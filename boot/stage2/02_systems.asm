@@ -408,6 +408,12 @@ hostreq_program:
     cmp al, 1
     je .do_adopt
 
+    mov si, host_action_buffer
+    mov di, action_git_sync
+    call streq
+    cmp al, 1
+    je .do_git_sync
+
     mov si, msg_hostreq_unknown
     call print_string
     ret
@@ -483,6 +489,11 @@ hostreq_program:
     mov cx, TASK_GOAL_SIZE - 1
     call read_line
     call host_send_adopt_request
+    call host_read_response
+    ret
+
+.do_git_sync:
+    call host_send_git_sync_request
     call host_read_response
     ret
 
@@ -1719,6 +1730,16 @@ host_send_balance_request:
     call serial_write_string
     ret
 
+host_send_git_sync_request:
+    mov si, msg_host_post_git_sync
+    call serial_write_string
+    call serial_write_generation_field
+    mov si, msg_json_close
+    call serial_write_string
+    mov si, newline
+    call serial_write_string
+    ret
+
 host_send_clone_request:
     mov si, msg_host_post_clone_prefix
     call serial_write_string
@@ -1762,4 +1783,3 @@ host_send_adopt_request:
     mov si, newline
     call serial_write_string
     ret
-

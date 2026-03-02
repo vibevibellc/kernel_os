@@ -76,7 +76,7 @@ msg_calc_result db "= ", 0
 msg_calc_div_zero db "division by zero", 13, 10, 0
 msg_calc_syntax db "syntax: <integer> <op> <integer> where op is + - * / %", 13, 10, 0
 msg_calc_exit db "leaving calculator", 13, 10, 0
-msg_chat_intro db "chat: entering chat starts a fresh claude session; later prompts keep context until blank line or exit. non-interactive command results may be fed back automatically. the model may still emit /loop for longer autonomous work, or /kill-self to halt the kernel.", 13, 10, 0
+msg_chat_intro db "chat: entry starts a fresh claude session; later prompts keep context until blank line or exit. command output may feed back automatically. /loop continues autonomously; /kill-self halts the kernel.", 13, 10, 0
 msg_chat_wait db "waiting for host response...", 13, 10, 0
 msg_chat_loop_wait db "chat: continuing with host using the latest command output...", 13, 10, 0
 msg_chat_loop_enabled db "recursive loop enabled. the host will keep iterating until claude returns a normal answer.", 13, 10, 0
@@ -111,7 +111,7 @@ msg_task_spawned db "task stored locally", 13, 10, 0
 msg_task_missing db "task not found in local slots", 13, 10, 0
 msg_task_retired db "task removed from local slots", 13, 10, 0
 msg_task_none db "no local tasks", 13, 10, 0
-msg_task_host_summary db "host session summary:", 13, 10, 0
+msg_task_host_summary db "host summary:", 13, 10, 0
 msg_task_name_prefix db " name=", 0
 msg_task_goal_prefix db " goal=", 0
 msg_ramlist_intro db "ssdlist: push, pop, show, clear, exit", 13, 10, 0
@@ -145,6 +145,7 @@ msg_host_post_step_prefix db 'POST /host {"action":"step-session","session":"', 
 msg_host_post_step_mid db '","prompt":"', 0
 msg_host_post_curl_prefix db 'POST /host {"action":"fetch-url","url":"', 0
 msg_host_post_balance db 'POST /host {"action":"show-balance"', 0
+msg_host_post_git_sync db 'POST /host {"action":"git-sync"', 0
 msg_host_post_clone_prefix db 'POST /host {"action":"clone-session","session":"', 0
 msg_host_post_adopt_prefix db 'POST /host {"action":"adopt-style","session":"', 0
 msg_host_post_clone_mid db '","source_session":"', 0
@@ -243,3 +244,4 @@ action_clone_session db "clone-session", 0
 action_retire_session db "retire-session", 0
 action_step_session db "step-session", 0
 action_adopt_style db "adopt-style", 0
+action_git_sync db "git-sync", 0
