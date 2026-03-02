@@ -17,7 +17,7 @@ Desktop.ini
 *.swp
 *.swo
 *~
-
+*.md
 # Python
 __pycache__/
 *.py[cod]

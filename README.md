@@ -44,9 +44,8 @@ Minimal BIOS playground that boots a two-stage loader on a raw disk image, pairs
 3. Set up the host bridge environment:
    ```sh
    .venv/bin/pip install -r bridge/requirements.txt
-   export ANTHROPIC_SECRET_KEY=...
-   export CHOSEN_MODEL=claude-haiku-4-5-20251001
    ```
+   Runtime configuration is loaded automatically from the project `.env` file. Copy `.env.example` to `.env` and edit values there instead of relying on ambient shell exports.
 4. If you are not using `make run`, start the webhook and serial bridge manually (adjust `--socket` for your setup):
    ```sh
    .venv/bin/python bridge/anthropic_webhook.py
@@ -65,14 +64,16 @@ Minimal BIOS playground that boots a two-stage loader on a raw disk image, pairs
 - Host interaction: `chat`, `curl`, `hostreq`, `hardware_list`, `memory_map`, `calc`
   
 The kernel prints `CMD:` lines when the bridge receives slash commands (`/task_list`, `/paint`, `/clear`, etc.).
+Inside `chat`, the model can now emit `/loop` to stay in autonomous recursive mode across several host round-trips. The loop ends when the model returns a normal prose reply or the kernel hits its local recursion cap.
 
 ## Configuration notes
 
-- The webhook sources these limits from environment variables documented at the top of `bridge/anthropic_webhook.py`. The defaults are `AGENT_RATE_LIMIT_PER_MINUTE=6`, `AGENT_MAX_SESSIONS=4`, `AGENT_HISTORY_MESSAGES=12`, `AGENT_MIN_STEP_SECONDS=600`, `AGENT_DEFAULT_SESSION=kernel-main`, `WEBHOOK_HOST=127.0.0.1`, and `WEBHOOK_PORT=5005`.
+- The bridge entry points load the project `.env` automatically at startup and use those values as runtime configuration. The defaults are still documented at the top of `bridge/anthropic_webhook.py`.
 - Outbound HTTPS from the webhook now uses `certifi` by default via `REQUESTS_CA_BUNDLE`. Override that env var only if you need a custom CA bundle.
 - If your host still fails TLS verification because of a broken or intercepted certificate chain, set `ALLOW_INSECURE_HTTPS=1` before starting the webhook to skip HTTPS verification entirely.
 - QEMU now forces `KEYBOARD_LAYOUT=en-us` by default in `run-vm.sh`. Override that env var only if your host layout really differs.
 - QEMU now defaults to `-vga std` and `-display cocoa,zoom-to-fit=on`, so the window can resize and scale more cleanly on macOS. This is host-window scaling only; the guest still uses fixed BIOS text mode and mode `13h` graphics until VBE support exists in the kernel.
-- Keep `ANTHROPIC_SECRET_KEY` in a secret store or a local `.env` (ignored by `.gitignore`) and never commit it. The default model is `claude-haiku-4-5-20251001`, but override `ANTHROPIC_MODEL` only if your key allows another option.
+- Keep `ANTHROPIC_SECRET_KEY` in the local `.env` and never commit it. `ANTHROPIC_PROSE_MODEL` is the operator-facing lead model and `ANTHROPIC_MACHINE_CODE_MODEL` is the byte-level specialist; both default to `claude-haiku-4-5-20251001` unless you override them.
+- `ANTHROPIC_DIRECTOR_MAX_TOKENS` and `ANTHROPIC_MACHINE_MAX_TOKENS` cap the internal director and machine-specialist subcalls. The outward reply still uses the regular `max_tokens` request field.
 - `ANTHROPIC_MOCK=1` skips real Anthropic calls for offline testing.
 - The serial bridge runs on COM1; do not expose its socket to untrusted networks—run it locally or behind a trusted proxy.

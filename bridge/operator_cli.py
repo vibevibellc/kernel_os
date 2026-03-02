@@ -5,6 +5,11 @@ import sys
 
 import requests
 
+from project_env import load_project_env
+
+
+load_project_env()
+
 
 def post(webhook: str, payload: dict) -> dict:
     response = requests.post(f"{webhook.rstrip('/')}/host", json=payload, timeout=90)

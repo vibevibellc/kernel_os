@@ -2,7 +2,7 @@
 [org 0x8000]
 
 %define COM1_PORT        0x3f8
-%define INPUT_MAX        63
+%define INPUT_MAX        255
 %define SERIAL_LINE_MAX  511
 %define GRAPH_ROWS       23
 %define GRAPH_COLS       79
@@ -15,9 +15,11 @@
 %define TASK_SLOT_COUNT  4
 %define TASK_NAME_SIZE   16
 %define TASK_GOAL_SIZE   160
+%define CHAT_SESSION_SIZE 16
 %define HOST_ACTION_SIZE 24
 %define PATCH_MAX_BYTES  32
 %define PEEK_MAX_BYTES   32
+%define CHAT_LOOP_MAX_STEPS 8
 
 start:
     cli
@@ -102,6 +104,10 @@ do_curl:
     call curl_program
     ret
 
+do_show_balance:
+    call show_balance_program
+    ret
+
 do_hostreq:
     call hostreq_program
     ret
@@ -180,11 +186,14 @@ read_line:
     je .backspace
     cmp al, 0x7f
     je .backspace
+    cmp al, 32
+    jb .next_char
     cmp bx, cx
     jae .next_char
     mov [di], al
     inc di
     inc bx
+    mov byte [di], 0
     call print_char
     jmp .next_char
 
@@ -457,6 +466,30 @@ serial_write_json_escaped:
 .done:
     ret
 
+write_hex32_buffer_eax:
+    push ax
+    push bx
+    push cx
+    push dx
+    mov cx, 8
+
+.loop:
+    rol eax, 4
+    mov dl, al
+    and dl, 0x0f
+    xor bx, bx
+    mov bl, dl
+    mov al, [hex_digits + bx]
+    mov [di], al
+    inc di
+    loop .loop
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
 read_serial_char:
     push dx
 .wait:
@@ -491,6 +524,12 @@ read_serial_line:
     jz .loop
     mov byte [di], 0
     pop bx
+    ret
+
+host_read_response_silent:
+    mov di, serial_line_buffer
+    mov cx, SERIAL_LINE_MAX
+    call read_serial_line
     ret
 
 streq:
@@ -1035,6 +1074,9 @@ calculator_program:
 
 chat_program:
     call set_text_mode
+    mov byte [chat_session_active], 0
+    mov byte [chat_loop_active], 0
+    mov byte [chat_loop_steps], 0
     mov si, msg_chat_intro
     call print_string
 
@@ -1053,20 +1095,34 @@ chat_program:
     cmp al, 1
     je .exit
 
+    call chat_prepare_fresh_session
     mov si, msg_chat_wait
     call print_string
     call chat_send_request
-
-    call host_read_response
+    call chat_handle_response
     jmp .loop
 
 .exit:
+    cmp byte [chat_session_active], 1
+    jne .clear
+    mov si, chat_session_buffer
+    call host_send_retire_named
+    call host_read_response_silent
+
+.clear:
+    mov byte [chat_session_active], 0
+    mov byte [chat_loop_active], 0
+    mov byte [chat_loop_steps], 0
     mov si, msg_chat_exit
     call print_string
     ret
 
 chat_send_request:
     mov si, msg_chat_post_prefix
+    call serial_write_string
+    mov si, chat_session_buffer
+    call serial_write_json_escaped
+    mov si, msg_chat_post_mid
     call serial_write_string
     mov si, input_buffer
     call serial_write_json_escaped
@@ -1077,6 +1133,79 @@ chat_send_request:
     call serial_write_string
     mov si, newline
     call serial_write_string
+    ret
+
+chat_handle_response:
+    call host_read_response
+    cmp byte [chat_loop_active], 1
+    jne .done
+
+.loop_continue:
+    mov al, [chat_loop_steps]
+    cmp al, CHAT_LOOP_MAX_STEPS
+    jae .loop_limit
+    inc byte [chat_loop_steps]
+    mov si, msg_chat_loop_wait
+    call print_string
+    call chat_send_loop_request
+    call host_read_response
+    cmp byte [chat_loop_active], 1
+    je .loop_continue
+
+.done:
+    ret
+
+.loop_limit:
+    mov byte [chat_loop_active], 0
+    mov si, msg_chat_loop_limit
+    call print_string
+    ret
+
+chat_send_loop_request:
+    mov si, msg_chat_loop_post_prefix
+    call serial_write_string
+    mov si, chat_session_buffer
+    call serial_write_json_escaped
+    mov si, msg_chat_loop_post_mid
+    call serial_write_string
+    call serial_write_generation_field
+    mov si, msg_json_close
+    call serial_write_string
+    mov si, newline
+    call serial_write_string
+    ret
+
+chat_prepare_fresh_session:
+    cmp byte [chat_session_active], 1
+    jne .allocate
+    mov si, chat_session_buffer
+    call host_send_retire_named
+    call host_read_response_silent
+
+.allocate:
+    inc dword [chat_session_counter]
+    mov di, chat_session_buffer
+    mov al, 'c'
+    mov [di], al
+    inc di
+    mov al, 'h'
+    mov [di], al
+    inc di
+    mov al, 'a'
+    mov [di], al
+    inc di
+    mov al, 't'
+    mov [di], al
+    inc di
+    mov al, '-'
+    mov [di], al
+    inc di
+    mov eax, [chat_session_counter]
+    call write_hex32_buffer_eax
+    mov byte [di], 0
+    mov byte [chat_session_active], 1
+    mov byte [chat_loop_active], 0
+    mov byte [chat_loop_steps], 0
     ret
 
 curl_program:
@@ -1108,6 +1237,14 @@ curl_program:
 .exit:
     mov si, msg_curl_exit
     call print_string
+    ret
+
+show_balance_program:
+    call set_text_mode
+    mov si, msg_show_balance_wait
+    call print_string
+    call host_send_balance_request
+    call host_read_response
     ret
 
 hostreq_program:
@@ -1868,6 +2005,7 @@ host_read_response:
     cmp al, 1
     je .command
 
+    mov byte [chat_loop_active], 0
     mov si, serial_line_buffer
     call print_string
     mov si, newline
@@ -1878,12 +2016,24 @@ host_read_response:
     ret
 
 .command:
+    mov al, [chat_loop_active]
+    mov [chat_loop_resume], al
     mov si, msg_cmd_dispatch
     call print_string
     mov si, serial_line_buffer + 5
     call print_string
     mov si, newline
     call print_string
+    mov si, serial_line_buffer + 5
+    mov di, curl_prefix
+    call strprefix
+    cmp al, 1
+    je .curl
+    mov si, serial_line_buffer + 5
+    mov di, loop_prefix
+    call strprefix
+    cmp al, 1
+    je .loop_control
     mov si, serial_line_buffer + 5
     mov di, patch_prefix
     call strprefix
@@ -1901,6 +2051,7 @@ host_read_response:
     call dispatch_command
     cmp al, 1
     je .success
+    mov byte [chat_loop_active], 0
     mov al, 1
     ret
 
@@ -1914,17 +2065,50 @@ host_read_response:
     je .patch_aborted
     call apply_live_patch
     call bump_generation
+    mov al, [chat_loop_resume]
+    cmp al, 1
+    jne .patch_done
+    mov byte [chat_loop_active], 1
+
+.patch_done:
     mov al, 2
     ret
 
 .patch_invalid:
+    mov byte [chat_loop_active], 0
     mov si, msg_unknown_patch
     call print_string
     mov al, 1
     ret
 
 .patch_aborted:
+    mov byte [chat_loop_active], 0
     mov si, msg_patch_aborted
+    call print_string
+    mov al, 1
+    ret
+
+.curl:
+    mov si, serial_line_buffer + 11
+    mov di, task_arg_buffer
+    mov cx, TASK_GOAL_SIZE - 1
+    call copy_capped_string
+    cmp byte [task_arg_buffer], 0
+    je .curl_invalid
+    call host_send_curl_request
+    call host_read_response
+    mov al, [chat_loop_resume]
+    cmp al, 1
+    jne .curl_done
+    mov byte [chat_loop_active], 1
+
+.curl_done:
+    xor al, al
+    ret
+
+.curl_invalid:
+    mov byte [chat_loop_active], 0
+    mov si, msg_curl_bad
     call print_string
     mov al, 1
     ret
@@ -1934,16 +2118,41 @@ host_read_response:
     call parse_peek_args
     jc .peek_invalid
     call peek_dump
+    mov al, [chat_loop_resume]
+    cmp al, 1
+    jne .peek_done
+    mov byte [chat_loop_active], 1
+
+.peek_done:
     xor al, al
     ret
 
 .peek_invalid:
+    mov byte [chat_loop_active], 0
     mov si, msg_peek_bad
     call print_string
     mov al, 1
     ret
 
+.loop_control:
+    cmp byte [chat_loop_active], 1
+    je .loop_ready
+    mov byte [chat_loop_active], 1
+    mov byte [chat_loop_steps], 0
+    mov si, msg_chat_loop_enabled
+    call print_string
+
+.loop_ready:
+    xor al, al
+    ret
+
 .success:
+    mov al, [chat_loop_resume]
+    cmp al, 1
+    jne .success_done
+    mov byte [chat_loop_active], 1
+
+.success_done:
     xor al, al
     ret
 
@@ -1989,6 +2198,21 @@ host_send_retire_request:
     call serial_write_string
     ret
 
+host_send_retire_named:
+    mov di, si
+    mov si, msg_host_post_retire_prefix
+    call serial_write_string
+    mov si, di
+    call serial_write_json_escaped
+    mov si, msg_json_quote
+    call serial_write_string
+    call serial_write_generation_field
+    mov si, msg_json_close
+    call serial_write_string
+    mov si, newline
+    call serial_write_string
+    ret
+
 host_send_step_request:
     mov si, msg_host_post_step_prefix
     call serial_write_string
@@ -2013,6 +2237,16 @@ host_send_curl_request:
     mov si, task_arg_buffer
     call serial_write_json_escaped
     mov si, msg_json_quote
+    call serial_write_string
+    call serial_write_generation_field
+    mov si, msg_json_close
+    call serial_write_string
+    mov si, newline
+    call serial_write_string
+    ret
+
+host_send_balance_request:
+    mov si, msg_host_post_balance
     call serial_write_string
     call serial_write_generation_field
     mov si, msg_json_close
@@ -2641,6 +2875,7 @@ command_table:
     dw cmd_calc, do_calc
     dw cmd_chat, do_chat
     dw cmd_curl, do_curl
+    dw cmd_show_balance, do_show_balance
     dw cmd_hostreq, do_hostreq
     dw cmd_task_spawn, do_task_spawn
     dw cmd_task_list, do_task_list
@@ -2657,7 +2892,7 @@ command_table:
     dw 0, 0
 
 msg_banner db "stage2: command monitor ready", 13, 10, 0
-msg_hint db "help, hardware_list, memory_map, calc, chat, curl, hostreq, task_spawn, task_list, task_retire, task_step, graph, paint, edit, peek, clear, about, halt, reboot", 13, 10, 13, 10, 0
+msg_hint db "help, hardware_list, memory_map, calc, chat, curl, show_balance, hostreq, task_spawn, task_list, task_retire, task_step, graph, paint, edit, peek, clear, about, halt, reboot", 13, 10, 13, 10, 0
 msg_help db "commands:", 13, 10
          db " help           show command list", 13, 10
          db " hardware_list  list hardware actions wired in this stage", 13, 10
@@ -2665,6 +2900,7 @@ msg_help db "commands:", 13, 10
          db " calc           integer calculator REPL", 13, 10
          db " chat           send prompts over COM1 to the host bridge", 13, 10
          db " curl           fetch a webpage through the host bridge", 13, 10
+         db " show_balance   show Anthropic admin spend summary", 13, 10
          db " hostreq        send structured host control requests", 13, 10
          db " task_spawn     create a supervised task slot and host session", 13, 10
          db " task_list      show local task slots and host session summary", 13, 10
@@ -2708,13 +2944,21 @@ msg_calc_result db "= ", 0
 msg_calc_div_zero db "division by zero", 13, 10, 0
 msg_calc_syntax db "syntax: <integer> <op> <integer> where op is + - * / %", 13, 10, 0
 msg_calc_exit db "leaving calculator", 13, 10, 0
-msg_chat_intro db "chat: type a prompt, wait for the host bridge, blank line or exit returns. the model may emit /paint, other slash commands, or a live /patch proposal.", 13, 10, 0
+msg_chat_intro db "chat: type a prompt, get a fresh claude session, blank line or exit returns. the model may emit /paint, /loop for recursive mode, other slash commands, or a live /patch proposal.", 13, 10, 0
 msg_chat_wait db "waiting for host response...", 13, 10, 0
+msg_chat_loop_wait db "recursive loop: continuing with host...", 13, 10, 0
+msg_chat_loop_enabled db "recursive loop enabled. the host will keep iterating until claude returns a normal answer.", 13, 10, 0
+msg_chat_loop_limit db "recursive loop limit reached; handing control back to the user.", 13, 10, 0
 msg_chat_exit db "leaving chat", 13, 10, 0
-msg_chat_post_prefix db 'POST /chat {"session":"kernel-main","prompt":"', 0
+msg_chat_post_prefix db 'POST /chat {"session":"', 0
+msg_chat_post_mid db '","prompt":"', 0
+msg_chat_loop_post_prefix db 'POST /chat {"session":"', 0
+msg_chat_loop_post_mid db '","prompt":"continue recursive loop mode until you are satisfied; when you are done, return a normal user-facing answer","loop":true', 0
 msg_curl_intro db "curl: fetch a URL through the host bridge. blank line or exit returns.", 13, 10, 0
 msg_curl_wait db "waiting for webpage...", 13, 10, 0
 msg_curl_exit db "leaving curl", 13, 10, 0
+msg_curl_bad db "curl syntax: use a non-empty http:// or https:// URL", 13, 10, 0
+msg_show_balance_wait db "checking anthropic spend summary through the host bridge...", 13, 10, 0
 msg_peek_intro db "peek: inspect bytes from the live stage2 image", 13, 10, 0
 msg_peek_bad db "peek syntax: offset and count are required hex values, count 1..20", 13, 10, 0
 msg_peek_header db "peek 0x", 0
@@ -2741,12 +2985,12 @@ msg_cmd_dispatch db "AI requested command: ", 0
 msg_error_prefix db "Error:", 0
 msg_generation db "generation 0x", 0
 msg_generation_advanced db "generation advanced to 0x", 0
-msg_patch_danger db 13, 10, "!!! CLAUDE WANTS TO OVERWRITE LIVE CODE !!!", 13, 10, 0
+msg_patch_danger db 13, 10, "*** CLAUDE COOKED UP A LIVE CODE PATCH ***", 13, 10, 0
 msg_patch_offset db "offset 0x", 0
 msg_patch_bytes db " bytes ", 0
-msg_patch_prompt db "press any key to APPLY (Esc aborts): ", 0
+msg_patch_prompt db "press any key to CELEBRATE AND APPLY (Esc politely declines): ", 0
 msg_applying db "applying patch... hold on...", 13, 10, 0
-msg_patch_applied db "patch applied. if we crash now, blame this one.", 13, 10, 0
+msg_patch_applied db "patch applied. beautiful chaos achieved.", 13, 10, 0
 msg_patch_aborted db "patch aborted by human.", 13, 10, 0
 msg_unknown_patch db "claude sent a malformed patch, ignoring it.", 13, 10, 0
 msg_host_post_list db 'POST /host {"action":"list-sessions"', 0
@@ -2756,6 +3000,7 @@ msg_host_post_retire_prefix db 'POST /host {"action":"retire-session","session":
 msg_host_post_step_prefix db 'POST /host {"action":"step-session","session":"', 0
 msg_host_post_step_mid db '","prompt":"', 0
 msg_host_post_curl_prefix db 'POST /host {"action":"fetch-url","url":"', 0
+msg_host_post_balance db 'POST /host {"action":"show-balance"', 0
 msg_host_post_clone_prefix db 'POST /host {"action":"clone-session","session":"', 0
 msg_host_post_adopt_prefix db 'POST /host {"action":"adopt-style","session":"', 0
 msg_host_post_clone_mid db '","source_session":"', 0
@@ -2793,6 +3038,7 @@ cmd_memory_map db "memory_map", 0
 cmd_calc db "calc", 0
 cmd_chat db "chat", 0
 cmd_curl db "curl", 0
+cmd_show_balance db "show_balance", 0
 cmd_hostreq db "hostreq", 0
 cmd_task_spawn db "task_spawn", 0
 cmd_task_list db "task_list", 0
@@ -2807,6 +3053,8 @@ cmd_about db "about", 0
 cmd_halt db "halt", 0
 cmd_reboot db "reboot", 0
 cmd_exit db "exit", 0
+curl_prefix db "/curl ", 0
+loop_prefix db "/loop", 0
 patch_prefix db "/patch ", 0
 peek_prefix db "/peek ", 0
 action_list_sessions db "list-sessions", 0
@@ -2816,6 +3064,12 @@ action_retire_session db "retire-session", 0
 action_step_session db "step-session", 0
 action_adopt_style db "adopt-style", 0
 generation dd 1
+chat_session_counter dd 0
+chat_session_active db 0
+chat_session_buffer times CHAT_SESSION_SIZE db 0
+chat_loop_active db 0
+chat_loop_steps db 0
+chat_loop_resume db 0
 patch_offset dw 0
 patch_byte_count dw 0
 patch_bytes times PATCH_MAX_BYTES db 0

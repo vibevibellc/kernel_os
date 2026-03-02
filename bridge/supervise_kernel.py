@@ -13,9 +13,15 @@ from urllib.parse import urljoin
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from command_protocol import match_pending_observation
+from project_env import load_project_env
+
+
+load_project_env()
+
 
 REQUEST_PREFIX = "POST "
-PEEK_OUTPUT_PATTERN = re.compile(r"^peek 0x[0-9A-Fa-f]+:\s")
+PROMPT_PATTERN = re.compile(r"^(?:kernel_os|chat|calc|url|session|goal|prompt|host action|source session|modifier|offset hex|count hex).*>\s*$")
 
 
 def sanitize_line(text: str, limit: int = 480) -> str:
@@ -34,7 +40,7 @@ def connect_socket(path: str) -> socket.socket:
 
 
 def write_line(sock: socket.socket, text: str) -> None:
-    sock.sendall((text + "\r\n").encode("utf-8", errors="replace"))
+    sock.sendall((text + "\r").encode("utf-8", errors="replace"))
 
 
 def forward_request(webhook: str, route: str, payload: dict) -> dict:
@@ -95,21 +101,51 @@ def print_status(message: str) -> None:
 def record_pending_observation(
     webhook: str,
     pending_peeks: deque[dict],
+    pending_patches: deque[dict],
     line: str,
 ) -> None:
-    if not pending_peeks or not PEEK_OUTPUT_PATTERN.match(line):
+    payload = match_pending_observation(pending_peeks, pending_patches, line)
+    if payload is None:
         return
 
-    pending = pending_peeks.popleft()
-    payload = {
+    data = forward_request(webhook, "/host", {
         "action": "record-observation",
-        "session": pending["session"],
-        "kind": "peek",
-        "origin": pending["command"],
-        "observation": line,
-    }
-    data = forward_request(webhook, "/host", payload)
-    print_status(f"observe[{pending['session']}] -> {sanitize_line(data.get('message', line))}")
+        **payload,
+    })
+    print_status(f"observe[{payload['session']}] -> {sanitize_line(data.get('message', line))}")
+
+
+def append_kernel_output(
+    recent_output: dict[str, deque[str]],
+    capture_session: str | None,
+    line: str,
+) -> str | None:
+    if not capture_session:
+        return capture_session
+    if PROMPT_PATTERN.match(line):
+        return None
+    if line.startswith("POST "):
+        return capture_session
+    if line.startswith("AI: "):
+        return capture_session
+    recent_output.setdefault(capture_session, deque(maxlen=12)).append(line)
+    return capture_session
+
+
+def attach_recent_output(
+    payload: dict,
+    session_id: str,
+    recent_output: dict[str, deque[str]],
+) -> None:
+    lines = recent_output.get(session_id)
+    prompt = (payload.get("prompt") or "").strip()
+    if not lines or not prompt or payload.get("messages"):
+        return
+    payload["messages"] = [
+        {"role": "user", "content": "Kernel output since your last action:\n" + "\n".join(lines)},
+        {"role": "user", "content": prompt},
+    ]
+    recent_output[session_id].clear()
 
 
 def main() -> None:
@@ -129,6 +165,9 @@ def main() -> None:
             sock = connect_socket(args.socket)
             sock.setblocking(False)
             pending_peeks: deque[dict] = deque()
+            pending_patches: deque[dict] = deque()
+            recent_output: dict[str, deque[str]] = {}
+            capture_session: str | None = None
             selector = selectors.DefaultSelector()
             selector.register(sock, selectors.EVENT_READ, "socket")
             if sys.stdin.isatty():
@@ -161,7 +200,8 @@ def main() -> None:
                             line = raw_line.rstrip("\r")
                             if not line.startswith(REQUEST_PREFIX):
                                 try:
-                                    record_pending_observation(args.webhook, pending_peeks, line)
+                                    capture_session = append_kernel_output(recent_output, capture_session, line)
+                                    record_pending_observation(args.webhook, pending_peeks, pending_patches, line)
                                 except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
                                     print_status(f"observe error -> {sanitize_line(str(exc))}")
                                 continue
@@ -172,11 +212,18 @@ def main() -> None:
                                 if route == "/chat":
                                     payload.setdefault("session", args.session)
                                 request_session = (payload.get("session") or args.session).strip() or args.session
+                                if route == "/chat":
+                                    attach_recent_output(payload, request_session, recent_output)
                                 data = forward_request(args.webhook, route, payload)
                                 reply = format_bridge_reply(data)
                                 command = data.get("kernel_command") or ""
                                 if command.startswith("/peek "):
                                     pending_peeks.append({"session": request_session, "command": command})
+                                if command.startswith("/patch "):
+                                    pending_patches.append({"session": request_session, "command": command})
+                                if command:
+                                    recent_output.setdefault(request_session, deque(maxlen=12)).clear()
+                                    capture_session = request_session
                                 print_status(f"bridge[{request_session}] -> {reply}")
                                 write_line(sock, reply)
                             except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
