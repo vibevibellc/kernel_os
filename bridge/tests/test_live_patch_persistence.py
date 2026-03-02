@@ -5,13 +5,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from live_patch_persistence import (
-    ListingEntry,
-    _apply_source_patch,
-    _parse_listing,
-    parse_patch_command,
-    patch_succeeded,
-)
+try:
+    from live_patch_persistence import (
+        ListingEntry,
+        _apply_source_patch,
+        _parse_listing,
+        parse_patch_command,
+        patch_succeeded,
+    )
+except ModuleNotFoundError:
+    from bridge.live_patch_persistence import (
+        ListingEntry,
+        _apply_source_patch,
+        _parse_listing,
+        parse_patch_command,
+        patch_succeeded,
+    )
 
 
 class PatchParsingTests(unittest.TestCase):
@@ -58,6 +67,34 @@ class ListingParseTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_merges_multi_chunk_listing_rows_for_one_source_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            (root / "boot" / "stage2").mkdir(parents=True)
+            top_source = root / "boot" / "stage2.asm"
+            top_source.write_text('%include "boot/stage2/04_commands_messages.asm"\n', encoding="utf-8")
+            listing = root / "stage2.lst"
+            listing.write_text(
+                "\n".join(
+                    [
+                        '     1                                  %include "boot/stage2/04_commands_messages.asm"',
+                        "    25 00001B24 7374616765323A2063- <1> msg_banner db \"stage2: command monitor ready\", 13, 10, 0",
+                        "    25 00001B2D 6F6D6D616E64206D6F- <1>",
+                        "    25 00001B36 6E69746F7220726561- <1>",
+                        "    25 00001B3F 64790D0A00          <1>",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            entries = _parse_listing(listing, root, top_source.resolve())
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].offset, 0x1B24)
+        self.assertEqual(len(entries[0].data), 32)
+        self.assertEqual(entries[0].data[:4], (0x73, 0x74, 0x61, 0x67))
 
 
 class SourceRewriteTests(unittest.TestCase):
@@ -127,6 +164,74 @@ class SourceRewriteTests(unittest.TestCase):
                         "start:",
                         "    db 0x31, 0xAA",
                         "loop: db 0xBB, 0xCC",
+                        "",
+                    ]
+                ),
+            )
+
+    def test_rewrites_full_multi_chunk_data_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            source = root / "boot" / "stage2" / "04_commands_messages.asm"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "\n".join(
+                    [
+                        'msg_banner db "stage2: command monitor ready", 13, 10, 0',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            entries = [
+                ListingEntry(
+                    source,
+                    1,
+                    0x1B24,
+                    (
+                        0x73,
+                        0x74,
+                        0x61,
+                        0x67,
+                        0x65,
+                        0x32,
+                        0x3A,
+                        0x20,
+                        0x63,
+                        0x6F,
+                        0x6D,
+                        0x6D,
+                        0x61,
+                        0x6E,
+                        0x64,
+                        0x20,
+                        0x6D,
+                        0x6F,
+                        0x6E,
+                        0x69,
+                        0x74,
+                        0x6F,
+                        0x72,
+                        0x20,
+                        0x72,
+                        0x65,
+                        0x61,
+                        0x64,
+                        0x79,
+                        0x0D,
+                        0x0A,
+                        0x00,
+                    ),
+                )
+            ]
+
+            _apply_source_patch(entries, 0x1B24, [0x53])
+
+            self.assertEqual(
+                source.read_text(encoding="utf-8"),
+                "\n".join(
+                    [
+                        "msg_banner db 0x53, 0x74, 0x61, 0x67, 0x65, 0x32, 0x3A, 0x20, 0x63, 0x6F, 0x6D, 0x6D, 0x61, 0x6E, 0x64, 0x20, 0x6D, 0x6F, 0x6E, 0x69, 0x74, 0x6F, 0x72, 0x20, 0x72, 0x65, 0x61, 0x64, 0x79, 0x0D, 0x0A, 0x00",
                         "",
                     ]
                 ),

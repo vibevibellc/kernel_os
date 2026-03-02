@@ -215,6 +215,88 @@ class ComposeModelReplyTests(unittest.TestCase):
             call_mock.call_args_list[1].args[0][-1]["content"],
         )
 
+    def test_director_invalid_json_is_bounced_back_for_repair(self) -> None:
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                "respond with /task_list",
+                '{"action":"respond","response":"/task_list"}',
+            ],
+        ) as call_mock:
+            content = webhook.compose_model_reply(
+                self.session,
+                self.user_messages,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/task_list")
+        self.assertEqual(call_mock.call_count, 2)
+        self.assertIn(
+            "your last prose-director reply was invalid",
+            call_mock.call_args_list[1].args[0][-1]["content"],
+        )
+
+    def test_machine_invalid_command_is_bounced_back_for_repair(self) -> None:
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"consult_machine","machine_brief":"Return the exact next patch command."}',
+                '{"action":"command","command":"patch 0003 90"}',
+                '{"action":"command","command":"/patch 0003 90"}',
+                "/patch 0003 90",
+            ],
+        ) as call_mock:
+            content = webhook.compose_model_reply(
+                self.session,
+                self.user_messages,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/patch 0003 90")
+        self.assertEqual(call_mock.call_count, 4)
+        self.assertIn(
+            "your last machine-code reply was invalid",
+            call_mock.call_args_list[2].args[0][-1]["content"],
+        )
+
+    def test_finalizer_noisy_command_is_bounced_back_for_repair(self) -> None:
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"consult_machine","machine_brief":"Return the exact next peek command."}',
+                '{"action":"command","command":"/peek 0000 10"}',
+                "Use this:\n/peek 0000 10",
+                "/peek 0000 10",
+            ],
+        ) as call_mock:
+            content = webhook.compose_model_reply(
+                self.session,
+                self.user_messages,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/peek 0000 10")
+        self.assertEqual(call_mock.call_count, 4)
+        self.assertIn(
+            "your last operator-facing reply was invalid",
+            call_mock.call_args_list[3].args[0][-1]["content"],
+        )
+
 
 class AnthropicBalanceFallbackTests(unittest.TestCase):
     def test_missing_admin_key_returns_graceful_message(self) -> None:
@@ -290,6 +372,54 @@ class ChatAndHostRouteTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["retired_reason"], "host-request")
         self.assertTrue(data["retired"])
+
+    def test_host_git_sync_returns_commit_result(self) -> None:
+        payload = {"action": "git-sync", "paths": ["boot/stage2.asm"]}
+
+        with mock.patch.object(webhook, "request", types.SimpleNamespace(get_json=lambda silent=True: payload)), mock.patch.object(
+            webhook,
+            "jsonify",
+            side_effect=lambda data: data,
+        ), mock.patch.object(
+            webhook,
+            "commit_and_sync",
+            return_value={
+                "changed": True,
+                "commit_message": "1700000000",
+                "branch": "main",
+                "message": "committed and pushed 1700000000",
+                "paths": ["boot/stage2.asm"],
+            },
+        ) as sync_mock:
+            data = webhook.host()
+
+        self.assertEqual(data["action"], "git-sync")
+        self.assertEqual(data["commit_message"], "1700000000")
+        sync_mock.assert_called_once_with(paths=["boot/stage2.asm"])
+
+    def test_step_session_git_sync_uses_reserved_session_name(self) -> None:
+        payload = {"action": "step-session", "session": webhook.GIT_SYNC_SESSION, "prompt": ""}
+
+        with mock.patch.object(webhook, "request", types.SimpleNamespace(get_json=lambda silent=True: payload)), mock.patch.object(
+            webhook,
+            "jsonify",
+            side_effect=lambda data: data,
+        ), mock.patch.object(
+            webhook,
+            "commit_and_sync",
+            return_value={
+                "changed": False,
+                "commit_message": "",
+                "branch": "",
+                "message": "no staged changes to commit",
+                "paths": [],
+            },
+        ) as sync_mock:
+            data = webhook.host()
+
+        self.assertEqual(data["action"], "git-sync")
+        self.assertEqual(data["session"], webhook.GIT_SYNC_SESSION)
+        sync_mock.assert_called_once_with()
 
     def test_chat_route_marks_kill_self_reason(self) -> None:
         payload = {"prompt": "halt yourself", "session": "chat-0004", "fresh_chat": True}

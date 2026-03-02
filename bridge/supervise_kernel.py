@@ -115,6 +115,15 @@ def record_pending_observation(
             if changed_paths:
                 changed_list = ", ".join(str(path) for path in changed_paths)
                 print_status(f"persisted live patch into source: {sanitize_line(changed_list)}")
+                sync_data = forward_request(
+                    webhook,
+                    "/host",
+                    {
+                        "action": "git-sync",
+                        "paths": [str(path) for path in changed_paths],
+                    },
+                )
+                print_status(f"git sync -> {sanitize_line(sync_data.get('message', 'ok'))}")
         except Exception as exc:  # noqa: BLE001
             print_status(f"patch persistence error -> {sanitize_line(str(exc))}")
 

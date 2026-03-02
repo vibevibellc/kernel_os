@@ -63,14 +63,31 @@ def _parse_listing(listing_path: Path, repo_root: Path, top_source: Path) -> lis
         if not data:
             continue
 
-        entries.append(
-            ListingEntry(
-                source_path=current_source,
-                line_number=int(code_match.group("line")),
-                offset=int(code_match.group("offset"), 16),
-                data=data,
-            )
+        source_path = current_source
+        line_number = int(code_match.group("line"))
+        offset = int(code_match.group("offset"), 16)
+        entry = ListingEntry(
+            source_path=source_path,
+            line_number=line_number,
+            offset=offset,
+            data=data,
         )
+        if entries:
+            previous = entries[-1]
+            if (
+                previous.source_path == entry.source_path
+                and previous.line_number == entry.line_number
+                and previous.offset + len(previous.data) == entry.offset
+            ):
+                entries[-1] = ListingEntry(
+                    source_path=previous.source_path,
+                    line_number=previous.line_number,
+                    offset=previous.offset,
+                    data=previous.data + entry.data,
+                )
+                continue
+
+        entries.append(entry)
 
     return entries
 

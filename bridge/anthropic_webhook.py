@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -16,6 +17,7 @@ import urllib3
 from flask import Flask, jsonify, request
 
 from command_protocol import extract_kernel_command
+from git_sync import commit_and_sync
 from project_env import load_project_env
 
 
@@ -38,10 +40,12 @@ REQUESTS_CA_BUNDLE = os.getenv("REQUESTS_CA_BUNDLE", certifi.where())
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 DIRECTOR_MAX_TOKENS = int(os.getenv("ANTHROPIC_DIRECTOR_MAX_TOKENS", "256"))
 MACHINE_MAX_TOKENS = int(os.getenv("ANTHROPIC_MACHINE_MAX_TOKENS", "256"))
+MODEL_REPAIR_ATTEMPTS = int(os.getenv("MODEL_REPAIR_ATTEMPTS", "2"))
 ALLOW_INSECURE_HTTPS = os.getenv("ALLOW_INSECURE_HTTPS", "0") == "1"
 AUTO_RETRY_INSECURE_HTTPS = os.getenv("AUTO_RETRY_INSECURE_HTTPS", "1") == "1"
 SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "vm/session_state.json"))
 EDIT_INTENT_PATTERN = re.compile(r"\b(edit|patch|modify|change|rewrite|fix|adjust)\b", re.IGNORECASE)
+GIT_SYNC_SESSION = os.getenv("GIT_SYNC_SESSION", "git-sync")
 KERNEL_COMMANDS = (
     "help",
     "hardware_list",
@@ -462,6 +466,131 @@ def normalize_machine_result(raw_text: str) -> dict:
     return {"action": "analysis", "analysis": analysis}
 
 
+def build_director_repair_feedback(issue: str, raw_text: str) -> str:
+    return (
+        "Correction: your last prose-director reply was invalid.\n\n"
+        f"Issue: {issue}\n"
+        f"Your last reply: {compact_text(raw_text, 220)}\n\n"
+        'Return JSON only with exactly one of:\n{"action":"respond","response":"..."}\n'
+        '{"action":"consult_machine","machine_brief":"..."}\n'
+        "Do not include markdown fences or extra text."
+    )
+
+
+def build_machine_repair_feedback(issue: str, raw_text: str) -> str:
+    return (
+        "Correction: your last machine-code reply was invalid.\n\n"
+        f"Issue: {issue}\n"
+        f"Your last reply: {compact_text(raw_text, 220)}\n\n"
+        'Return JSON only with exactly one of:\n{"action":"command","command":"/peek 0123 10"}\n'
+        '{"action":"command","command":"/peekpage 1200 0003"}\n'
+        '{"action":"command","command":"/patch 0123 90 90"}\n'
+        '{"action":"analysis","analysis":"..."}\n'
+        "If you choose command, the command must be exactly one valid /peek, /peekpage, or /patch line."
+    )
+
+
+def build_finalizer_repair_feedback(issue: str, raw_text: str) -> str:
+    return (
+        "Correction: your last operator-facing reply was invalid.\n\n"
+        f"Issue: {issue}\n"
+        f"Your last reply: {compact_text(raw_text, 220)}\n\n"
+        "Reply again now.\n"
+        "If you want to issue a command, return exactly one standalone command line and nothing else.\n"
+        "Otherwise return concise normal prose with no markdown fences."
+    )
+
+
+def validate_director_reply(raw_text: str) -> tuple[dict | None, str | None]:
+    parsed = parse_json_object(raw_text)
+    if not parsed:
+        return None, "reply was not a JSON object"
+
+    action = str(parsed.get("action", "")).strip()
+    if action == "respond":
+        response = str(parsed.get("response", "")).strip()
+        if response:
+            return {"action": "respond", "response": response}, None
+        return None, "respond action requires a non-empty response"
+    if action == "consult_machine":
+        brief = str(parsed.get("machine_brief", "")).strip()
+        if brief:
+            return {"action": "consult_machine", "machine_brief": brief}, None
+        return None, "consult_machine action requires a non-empty machine_brief"
+    return None, "action must be respond or consult_machine"
+
+
+def validate_machine_reply(raw_text: str) -> tuple[dict | None, str | None]:
+    parsed = parse_json_object(raw_text)
+    if parsed:
+        action = str(parsed.get("action", "")).strip()
+        if action == "command":
+            command = extract_kernel_command(str(parsed.get("command", "")).strip(), KERNEL_COMMANDS)
+            if command and command.startswith(("/peek ", "/peekpage ", "/patch ")):
+                return {"action": "command", "command": command}, None
+            return None, "command action requires exactly one valid /peek, /peekpage, or /patch command"
+        if action == "analysis":
+            analysis = str(parsed.get("analysis", "")).strip()
+            if analysis:
+                return {"action": "analysis", "analysis": analysis}, None
+            return None, "analysis action requires a non-empty analysis"
+        return None, "action must be command or analysis"
+
+    command = extract_kernel_command(raw_text, KERNEL_COMMANDS)
+    if command and command.startswith(("/peek ", "/peekpage ", "/patch ")):
+        stripped = raw_text.strip()
+        if stripped == command:
+            return {"action": "command", "command": command}, None
+        return None, "command replies must contain only the command and no extra text"
+    if raw_text.strip():
+        return None, "reply was not valid machine JSON and did not contain a standalone valid command"
+    return None, "reply was empty"
+
+
+def validate_finalizer_reply(raw_text: str) -> tuple[str | None, str | None]:
+    stripped = raw_text.strip()
+    if not stripped:
+        return None, "reply was empty"
+    if stripped.startswith("```"):
+        return None, "reply used markdown fences"
+
+    command = extract_kernel_command(stripped, KERNEL_COMMANDS)
+    if command is not None:
+        if stripped == command:
+            return stripped, None
+        return None, "command replies must contain only the command and no extra text"
+    if stripped.startswith("/"):
+        return None, "slash-prefixed reply was not a valid supported command"
+    return stripped, None
+
+
+def call_model_with_repair(
+    messages: list[dict],
+    *,
+    model: str,
+    system: str,
+    max_tokens: int,
+    validator,
+    feedback_builder,
+    fallback_normalizer,
+):
+    attempt_messages = list(messages)
+    last_raw = ""
+    for attempt in range(MODEL_REPAIR_ATTEMPTS + 1):
+        last_raw = call_anthropic(
+            attempt_messages,
+            model=model,
+            system=system,
+            max_tokens=max_tokens,
+        ).strip()
+        normalized, issue = validator(last_raw)
+        if issue is None:
+            return normalized
+        if attempt == MODEL_REPAIR_ATTEMPTS:
+            return fallback_normalizer(last_raw)
+        attempt_messages = attempt_messages + [{"role": "user", "content": feedback_builder(issue, last_raw)}]
+
+
 def build_machine_feedback(machine_brief: str, machine_result: dict) -> str:
     assert machine_result["action"] in {"command", "analysis"}
     if machine_result["action"] == "command":
@@ -493,13 +622,15 @@ def compose_model_reply(
     assert prose_model, "expected a prose model"
     assert machine_model, "expected a machine-code model"
 
-    director_raw = call_anthropic(
+    director_decision = call_model_with_repair(
         conversation,
         model=prose_model,
         system=build_prose_director_system(session, prose_system, generation) + (f"\n\n{turn_guidance}" if turn_guidance else ""),
         max_tokens=DIRECTOR_MAX_TOKENS,
+        validator=validate_director_reply,
+        feedback_builder=build_director_repair_feedback,
+        fallback_normalizer=normalize_director_decision,
     )
-    director_decision = normalize_director_decision(director_raw)
     assert director_decision["action"] in {"respond", "consult_machine"}
 
     if director_decision["action"] == "respond":
@@ -519,24 +650,29 @@ def compose_model_reply(
     machine_brief = director_decision["machine_brief"].strip()
     assert machine_brief, "machine consultation requires a non-empty brief"
     machine_messages = conversation + [{"role": "user", "content": f"Machine-code task:\n{machine_brief}"}]
-    machine_raw = call_anthropic(
+    machine_result = call_model_with_repair(
         machine_messages,
         model=machine_model,
         system=build_machine_code_system(session, generation) + (f"\n\n{turn_guidance}" if turn_guidance else ""),
         max_tokens=MACHINE_MAX_TOKENS,
+        validator=validate_machine_reply,
+        feedback_builder=build_machine_repair_feedback,
+        fallback_normalizer=normalize_machine_result,
     )
-    machine_result = normalize_machine_result(machine_raw)
     assert machine_result["action"] in {"command", "analysis"}
     if machine_result["action"] == "command":
         assert machine_result["command"].startswith(("/peek ", "/peekpage ", "/patch "))
     else:
         assert machine_result["analysis"].strip(), "machine analysis must not be empty"
 
-    content = call_anthropic(
+    content = call_model_with_repair(
         conversation + [{"role": "user", "content": build_machine_feedback(machine_brief, machine_result)}],
         model=prose_model,
         system=build_prose_finalizer_system(session, prose_system, generation) + (f"\n\n{turn_guidance}" if turn_guidance else ""),
         max_tokens=prose_max_tokens,
+        validator=validate_finalizer_reply,
+        feedback_builder=build_finalizer_repair_feedback,
+        fallback_normalizer=lambda raw_text: raw_text.strip(),
     ).strip()
     assert content, "prose finalizer returned an empty response"
     return maybe_retry_edit_pagination(
@@ -1097,7 +1233,42 @@ def host() -> tuple:
             }
         )
 
+    if action == "git-sync":
+        raw_paths = payload.get("paths") or []
+        if raw_paths and not isinstance(raw_paths, list):
+            return jsonify({"error": "paths must be a list"}), 400
+        paths = [str(path).strip() for path in raw_paths if str(path).strip()]
+        try:
+            result = commit_and_sync(paths=paths)
+        except (RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(
+            {
+                "action": action,
+                "changed": result["changed"],
+                "commit_message": result["commit_message"],
+                "branch": result["branch"],
+                "paths": result["paths"],
+                "message": result["message"],
+            }
+        )
+
     if action == "step-session":
+        if session_id == GIT_SYNC_SESSION:
+            try:
+                result = commit_and_sync()
+            except (RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
+                return jsonify({"error": str(exc), "session": session_id}), 500
+            return jsonify(
+                {
+                    "action": "git-sync",
+                    "session": session_id,
+                    "changed": result["changed"],
+                    "commit_message": result["commit_message"],
+                    "branch": result["branch"],
+                    "message": result["message"],
+                }
+            )
         if not session_id:
             return jsonify({"error": "expected session"}), 400
         try:
