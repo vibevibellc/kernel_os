@@ -128,6 +128,28 @@ class ComposeModelReplyTests(unittest.TestCase):
             call_mock.call_args_list[2].args[0][-1]["content"],
         )
 
+    def test_machine_consultation_can_return_peekpage_command(self) -> None:
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"consult_machine","machine_brief":"Walk memory near 0x1400 in fixed-size pages."}',
+                '{"action":"command","command":"/peekpage 1400 0002"}',
+                "/peekpage 1400 0002",
+            ],
+        ):
+            content = webhook.compose_model_reply(
+                self.session,
+                self.user_messages,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/peekpage 1400 0002")
+
     def test_machine_analysis_can_be_turned_into_prose(self) -> None:
         with mock.patch.object(
             webhook,
@@ -155,6 +177,44 @@ class ComposeModelReplyTests(unittest.TestCase):
             call_mock.call_args_list[2].args[0][-1]["content"],
         )
 
+    def test_edit_request_with_existing_peek_retries_broad_pagination_reply(self) -> None:
+        self.session["history"].append(
+            {
+                "role": "user",
+                "content": "Kernel observation (type=peek, origin=/peek 0 20): peek 0x0000: FA 31 C0 8E",
+            }
+        )
+        user_messages = [{"role": "user", "content": "edit some code non destructively"}]
+
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"respond","response":"/peekpage 0000 0001"}',
+                "/patch 0003 90",
+            ],
+        ) as call_mock:
+            content = webhook.compose_model_reply(
+                self.session,
+                user_messages,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/patch 0003 90")
+        self.assertEqual(call_mock.call_count, 2)
+        self.assertIn(
+            "Do not continue broad /peekpage pagination",
+            call_mock.call_args_list[0].kwargs["system"],
+        )
+        self.assertIn(
+            "Do not return /peekpage",
+            call_mock.call_args_list[1].args[0][-1]["content"],
+        )
+
 
 class AnthropicBalanceFallbackTests(unittest.TestCase):
     def test_missing_admin_key_returns_graceful_message(self) -> None:
@@ -169,6 +229,90 @@ class AnthropicBalanceFallbackTests(unittest.TestCase):
             content,
             "Anthropic admin key not configured; balance summary unavailable.",
         )
+
+
+class ChatSessionResolutionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state_patch = mock.patch.object(webhook, "persist_sessions", return_value=None)
+        self.state_patch.start()
+        webhook.SESSION_STATE.clear()
+
+    def tearDown(self) -> None:
+        webhook.SESSION_STATE.clear()
+        self.state_patch.stop()
+
+    def test_fresh_chat_revives_retired_session(self) -> None:
+        session = webhook.make_session("old goal")
+        session["active"] = False
+        session["history"] = [{"role": "user", "content": "old"}]
+        session["steps"] = 5
+        webhook.SESSION_STATE["chat-0001"] = session
+
+        revived = webhook.resolve_chat_session("chat-0001", fresh_chat=True)
+
+        self.assertTrue(revived["active"])
+        self.assertEqual(revived["history"], [])
+        self.assertEqual(revived["steps"], 0)
+        self.assertEqual(revived["goal"], "old goal")
+
+    def test_non_fresh_chat_reuses_active_session(self) -> None:
+        session = webhook.make_session("keep context")
+        session["history"] = [{"role": "user", "content": "peek first"}]
+        webhook.SESSION_STATE["chat-0002"] = session
+
+        resolved = webhook.resolve_chat_session("chat-0002", fresh_chat=False)
+
+        self.assertIs(resolved, session)
+        self.assertEqual(resolved["history"], [{"role": "user", "content": "peek first"}])
+
+
+class ChatAndHostRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.persist_patch = mock.patch.object(webhook, "persist_sessions", return_value=None)
+        self.persist_patch.start()
+        webhook.SESSION_STATE.clear()
+
+    def tearDown(self) -> None:
+        webhook.SESSION_STATE.clear()
+        self.persist_patch.stop()
+
+    def test_host_retire_session_returns_host_request_reason(self) -> None:
+        webhook.SESSION_STATE["chat-0003"] = webhook.make_session()
+        payload = {"action": "retire-session", "session": "chat-0003"}
+
+        with mock.patch.object(webhook, "request", types.SimpleNamespace(get_json=lambda silent=True: payload)), mock.patch.object(
+            webhook,
+            "jsonify",
+            side_effect=lambda data: data,
+        ):
+            data, status = webhook.host()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["retired_reason"], "host-request")
+        self.assertTrue(data["retired"])
+
+    def test_chat_route_marks_kill_self_reason(self) -> None:
+        payload = {"prompt": "halt yourself", "session": "chat-0004", "fresh_chat": True}
+        session = webhook.make_session()
+
+        with mock.patch.object(webhook, "request", types.SimpleNamespace(get_json=lambda silent=True: payload)), mock.patch.object(
+            webhook,
+            "jsonify",
+            side_effect=lambda data: data,
+        ), mock.patch.object(
+            webhook,
+            "resolve_chat_session",
+            return_value=session,
+        ), mock.patch.object(
+            webhook,
+            "apply_model_turn",
+            return_value=("/kill-self", True),
+        ):
+            data = webhook.chat()
+
+        self.assertEqual(data["retired_reason"], "kill-self")
+        self.assertTrue(data["retired"])
+        self.assertEqual(data["session"], "chat-0004")
 
 
 if __name__ == "__main__":

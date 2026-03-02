@@ -1,6 +1,7 @@
 QEMU ?= qemu-system-x86_64
 QEMU_IMG ?= qemu-img
 NASM ?= nasm
+NASMFLAGS ?= -w+all -w-reloc-abs-word
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
 VM_DIR := vm
@@ -30,10 +31,10 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(STAGE1_BIN): $(STAGE1_SRC) | $(BUILD_DIR)
-	$(NASM) -f bin -o $(STAGE1_BIN) $(STAGE1_SRC)
+	$(NASM) $(NASMFLAGS) -f bin -o $(STAGE1_BIN) $(STAGE1_SRC)
 
 $(STAGE2_BIN): $(STAGE2_SRC) | $(BUILD_DIR)
-	$(NASM) -f bin -o $(STAGE2_BIN) $(STAGE2_SRC)
+	$(NASM) $(NASMFLAGS) -f bin -o $(STAGE2_BIN) $(STAGE2_SRC)
 
 boot: disk $(STAGE1_BIN) $(STAGE2_BIN)
 	@stage2_size=$$(stat -f%z $(STAGE2_BIN)); \

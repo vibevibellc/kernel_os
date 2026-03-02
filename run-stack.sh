@@ -10,11 +10,13 @@ SERIAL_SOCKET="${SERIAL_SOCKET:-${ROOT_DIR}/vm/com1.sock}"
 QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
 WEBHOOK_LOG="${ROOT_DIR}/vm/webhook.log"
 BRIDGE_LOG="${ROOT_DIR}/vm/bridge.log"
+SESSION_STATE_PATH="${ROOT_DIR}/vm/session_state.json"
 WEBHOOK_URL="http://127.0.0.1:${WEBHOOK_PORT}"
 log_tail_pid=""
 
 mkdir -p "${ROOT_DIR}/vm"
 touch "${WEBHOOK_LOG}" "${BRIDGE_LOG}"
+rm -f "${SESSION_STATE_PATH}"
 
 webhook_pid=""
 bridge_pid=""

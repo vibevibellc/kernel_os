@@ -7,6 +7,7 @@ from collections import deque
 
 PATCH_PATTERN = re.compile(r"/patch\s+(?:0x)?[0-9a-fA-F]{1,4}(?:\s+(?:0x)?[0-9a-fA-F]{1,2}){1,32}\s*$")
 PEEK_PATTERN = re.compile(r"/peek\s+(?:0x)?[0-9a-fA-F]{1,4}\s+(?:0x)?[0-9a-fA-F]{1,2}\s*$")
+PEEK_PAGE_PATTERN = re.compile(r"/peekpage\s+(?:0x)?[0-9a-fA-F]{1,4}\s+(?:0x)?[0-9a-fA-F]{1,4}\s*$")
 CURL_PATTERN = re.compile(r"/curl\s+https?://\S+\s*$")
 LOOP_PATTERN = re.compile(r"/loop\s*$")
 PEEK_OUTPUT_PATTERN = re.compile(r"^peek 0x[0-9A-Fa-f]+:\s")
@@ -24,6 +25,8 @@ def extract_command_line(text: str, kernel_commands: tuple[str, ...]) -> str | N
     if LOOP_PATTERN.fullmatch(stripped):
         return stripped
     if PEEK_PATTERN.fullmatch(stripped):
+        return stripped
+    if PEEK_PAGE_PATTERN.fullmatch(stripped):
         return stripped
     if PATCH_PATTERN.fullmatch(stripped):
         return stripped

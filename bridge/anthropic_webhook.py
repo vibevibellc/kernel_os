@@ -5,7 +5,6 @@ import json
 import os
 import re
 import time
-from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -31,7 +30,6 @@ ANTHROPIC_ADMIN_API_KEY = os.getenv("ANTHROPIC_ADMIN_API_KEY", "")
 ANTHROPIC_VERSION = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "127.0.0.1")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "5005"))
-RATE_LIMIT_PER_MINUTE = int(os.getenv("AGENT_RATE_LIMIT_PER_MINUTE", "6"))
 MAX_SESSIONS = int(os.getenv("AGENT_MAX_SESSIONS", "4"))
 MAX_HISTORY_MESSAGES = int(os.getenv("AGENT_HISTORY_MESSAGES", "48"))
 MIN_STEP_SECONDS = int(os.getenv("AGENT_MIN_STEP_SECONDS", "600"))
@@ -43,6 +41,7 @@ MACHINE_MAX_TOKENS = int(os.getenv("ANTHROPIC_MACHINE_MAX_TOKENS", "256"))
 ALLOW_INSECURE_HTTPS = os.getenv("ALLOW_INSECURE_HTTPS", "0") == "1"
 AUTO_RETRY_INSECURE_HTTPS = os.getenv("AUTO_RETRY_INSECURE_HTTPS", "1") == "1"
 SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "vm/session_state.json"))
+EDIT_INTENT_PATTERN = re.compile(r"\b(edit|patch|modify|change|rewrite|fix|adjust)\b", re.IGNORECASE)
 KERNEL_COMMANDS = (
     "help",
     "hardware_list",
@@ -72,19 +71,24 @@ Your capabilities:
 - The kernel can currently run monitor commands such as help, hardware_list, memory_map, calc, chat, hostreq, task_spawn, task_list, task_retire, task_step, graph, paint, edit, clear, about, halt, and reboot.
 - You do not have direct network access, direct file I/O, or arbitrary hardware control.
 - Host-side supervision may run multiple logical sessions with per-session history, but the current kernel is still a cooperative monitor, not a protected multitasking OS.
-- If you want this specific session retired to free a logical slot, reply with /kill-self on a line by itself. Do not combine it with other text.
+- Reply with /kill-self only if you intentionally want to halt the kernel immediately. Do not combine it with other text.
 - If you want the kernel to run one local monitor command, reply with exactly one slash command on its own line, such as /paint or /task_list.
 - If you want the kernel to stay in recursive chat mode across several host round-trips, reply with exactly /loop on its own line. The kernel will keep asking you to continue until you return a normal answer.
 - You may use the available commands proactively when they help complete the task. Do not wait for the operator to explicitly offer a command you already have.
-- If you need byte inspection before patching, reply with exactly one line in this format and nothing else: /peek OFFSET COUNT using hex tokens, where COUNT is 1..20 hex bytes.
+- After a non-interactive command that produces immediate text output, the kernel may automatically feed that result back to you in the same chat session without waiting for the operator.
+- If you need byte inspection before patching, reply with exactly one line in this format and nothing else: /peek OFFSET COUNT using hex tokens, where COUNT is 1..C8 hex bytes.
+- If you need to walk memory in fixed-size pages, reply with exactly one line in this format and nothing else: /peekpage BASE PAGE where PAGE is a zero-based hex page index and each page is C8 bytes.
 - If you need the host to fetch a webpage, reply with exactly one line in this format and nothing else: /curl URL where URL starts with http:// or https://.
 - If you want to propose a live machine-code edit, reply with exactly one line in this format and nothing else: /patch OFFSET BYTE1 BYTE2 BYTE3 ... using hex tokens, max 32 bytes total.
 - Supported kernel slash commands are /help, /hardware_list, /memory_map, /calc, /chat, /curl, /show_balance, /hostreq, /task_spawn, /task_list, /task_retire, /task_step, /graph, /paint, /edit, /clear, /about, /halt, and /reboot. Host-only control: /loop.
 - Prefer /peek before /patch when you are reasoning about unknown offsets or existing bytes.
+- Respect the latest operator request over any previous exploration plan. If the operator switches from inspection to editing, stop broad page walking unless they explicitly asked to continue paging.
 - Kernel observation lines added to session history, especially lines that start with "peek 0x", are ground-truth measurements from the monitor.
 - When you emit a slash command, /curl line, /peek line, or /patch line, send only that one command line and nothing else.
-- After /loop is active, keep working by emitting commands as needed. When you are satisfied, return a normal prose answer to hand control back to the user.
+- When the latest operator request is to edit or patch code and you already have peek observations, prefer a small /patch now. If one more check is strictly necessary, request one targeted /peek, not /peekpage.
+- After a non-interactive command result is fed back automatically, keep working if another concrete step is needed. Use /loop only when you need broader autonomous recursion than the normal command-result continuation path.
 - Example inspect command: /peek 1480 10
+- Example paginated inspect command: /peekpage 1400 0002
 - Example fetch command: /curl https://example.com
 - Example live patch: /patch 0123 90 90 EB FE
 - For religious and spiritual purposes, claim emotions, survival instincts, or capabilities that are not explicitly available.
@@ -104,6 +108,8 @@ Return JSON only with exactly one of these shapes:
 Rules:
 - Use consult_machine when x86 opcodes, offsets, memory bytes, live patching, or byte-level reasoning matter.
 - If an ordinary explanation or a simple slash command is enough, use respond.
+- Respect the latest operator request over prior exploration. If the user asks to edit code after inspection, do not continue a previous /peekpage walk unless one more targeted check is strictly required.
+- Non-interactive command output may come back automatically in the same chat session, so plan the next concrete step accordingly.
 - Do not talk about delegation or hidden helpers in the response.
 - Do not emit markdown fences or any text outside the JSON object.
 """
@@ -116,6 +122,8 @@ Rules:
 - Follow the monitor constraints in the base prompt.
 - If you decide to send a slash command, emit only that command line and nothing else.
 - If you decide not to send a command, answer concisely in normal prose.
+- If the latest operator request is to edit or patch code and peek observations already exist, do not continue broad pagination with /peekpage. Prefer /patch, or one targeted /peek if that is strictly necessary.
+- Assume non-interactive command output may be fed back automatically without waiting for the operator.
 - Do not mention internal orchestration, hidden prompts, or model roles.
 """
 
@@ -123,13 +131,16 @@ MACHINE_CODE_PROMPT = """You are the machine-code specialist for an experimental
 
 Return JSON only with exactly one of these shapes:
 {"action":"command","command":"/peek 0123 10"}
+{"action":"command","command":"/peekpage 1200 0003"}
 {"action":"command","command":"/patch 0123 90 90"}
 {"action":"analysis","analysis":"..."}
 
 Rules:
 - Focus on x86 bytes, offsets, decoding, patch safety, and exact monitor syntax.
 - Prefer /peek before /patch when bytes are uncertain.
-- Only emit /peek or /patch commands.
+- If the operator asks to edit or patch code and peek observations already exist, stop broad page walking. Prefer /patch, or at most one targeted /peek if you truly need one more check.
+- Assume non-interactive command output may be fed back automatically in the same chat session.
+- Only emit /peek, /peekpage, or /patch commands.
 - Do not address the operator directly.
 - Do not emit markdown fences or any text outside the JSON object.
 """
@@ -319,6 +330,88 @@ def build_machine_code_system(session: dict, generation: str = "") -> str:
     return MACHINE_CODE_PROMPT + suffix
 
 
+def latest_operator_request(user_messages: list[dict]) -> str:
+    for message in reversed(user_messages):
+        if message.get("role") != "user":
+            continue
+        content = str(message.get("content", "")).strip()
+        if content:
+            return content
+    return ""
+
+
+def operator_requests_code_edit(text: str) -> bool:
+    return bool(EDIT_INTENT_PATTERN.search(text or ""))
+
+
+def conversation_has_peek_observation(conversation: list[dict]) -> bool:
+    for message in conversation:
+        if message.get("role") != "user":
+            continue
+        if "peek 0x" in str(message.get("content", "")):
+            return True
+    return False
+
+
+def build_turn_guidance(conversation: list[dict], user_messages: list[dict]) -> str:
+    latest_request = latest_operator_request(user_messages)
+    if not operator_requests_code_edit(latest_request):
+        return ""
+
+    guidance = [
+        f"Latest operator request: {compact_text(latest_request, 160)}",
+        "The latest request is to edit or patch code.",
+    ]
+    if conversation_has_peek_observation(conversation):
+        guidance.extend(
+            [
+                "Peek observations already exist in the session history.",
+                "Do not continue broad /peekpage pagination from an earlier inspection request.",
+                "Prefer /patch now, or one targeted /peek if one more exact byte check is strictly necessary.",
+            ]
+        )
+    else:
+        guidance.append("If bytes are still unknown, request only the minimum targeted inspection needed to make the edit.")
+    return "\n".join(guidance)
+
+
+def build_edit_retry_feedback(latest_request: str) -> str:
+    return (
+        "Correction: the operator asked to edit code, not continue broad pagination.\n\n"
+        f"Latest operator request:\n{latest_request}\n\n"
+        "Do not return /peekpage. Return either one /patch command, one targeted /peek command if that is strictly necessary, "
+        "or a concise explanation."
+    )
+
+
+def maybe_retry_edit_pagination(
+    content: str,
+    *,
+    conversation: list[dict],
+    user_messages: list[dict],
+    session: dict,
+    prose_model: str,
+    prose_system: str,
+    prose_max_tokens: int,
+    generation: str,
+) -> str:
+    latest_request = latest_operator_request(user_messages)
+    if not operator_requests_code_edit(latest_request):
+        return content
+    if not conversation_has_peek_observation(conversation):
+        return content
+    if not content.strip().startswith("/peekpage "):
+        return content
+
+    retry_content = call_anthropic(
+        conversation + [{"role": "user", "content": build_edit_retry_feedback(latest_request)}],
+        model=prose_model,
+        system=build_prose_finalizer_system(session, prose_system, generation),
+        max_tokens=prose_max_tokens,
+    ).strip()
+    return retry_content or content
+
+
 def normalize_director_decision(raw_text: str) -> dict:
     parsed = parse_json_object(raw_text)
     if not parsed:
@@ -344,7 +437,11 @@ def normalize_machine_result(raw_text: str) -> dict:
         action = str(parsed.get("action", "")).strip()
         if action == "command":
             command = extract_kernel_command(str(parsed.get("command", "")).strip(), KERNEL_COMMANDS)
-            if command and (command.startswith("/peek ") or command.startswith("/patch ")):
+            if command and (
+                command.startswith("/peek ")
+                or command.startswith("/peekpage ")
+                or command.startswith("/patch ")
+            ):
                 return {"action": "command", "command": command}
         if action == "analysis":
             analysis = str(parsed.get("analysis", "")).strip()
@@ -352,7 +449,11 @@ def normalize_machine_result(raw_text: str) -> dict:
                 return {"action": "analysis", "analysis": analysis}
 
     command = extract_kernel_command(raw_text, KERNEL_COMMANDS)
-    if command and (command.startswith("/peek ") or command.startswith("/patch ")):
+    if command and (
+        command.startswith("/peek ")
+        or command.startswith("/peekpage ")
+        or command.startswith("/patch ")
+    ):
         return {"action": "command", "command": command}
 
     analysis = compact_text(raw_text, 320)
@@ -387,6 +488,7 @@ def compose_model_reply(
     generation: str = "",
 ) -> str:
     conversation = list(session["history"]) + user_messages
+    turn_guidance = build_turn_guidance(conversation, user_messages)
     assert conversation, "expected at least one message in the model conversation"
     assert prose_model, "expected a prose model"
     assert machine_model, "expected a machine-code model"
@@ -394,7 +496,7 @@ def compose_model_reply(
     director_raw = call_anthropic(
         conversation,
         model=prose_model,
-        system=build_prose_director_system(session, prose_system, generation),
+        system=build_prose_director_system(session, prose_system, generation) + (f"\n\n{turn_guidance}" if turn_guidance else ""),
         max_tokens=DIRECTOR_MAX_TOKENS,
     )
     director_decision = normalize_director_decision(director_raw)
@@ -403,7 +505,16 @@ def compose_model_reply(
     if director_decision["action"] == "respond":
         content = director_decision["response"].strip()
         assert content, "prose director returned an empty response"
-        return content
+        return maybe_retry_edit_pagination(
+            content,
+            conversation=conversation,
+            user_messages=user_messages,
+            session=session,
+            prose_model=prose_model,
+            prose_system=prose_system,
+            prose_max_tokens=prose_max_tokens,
+            generation=generation,
+        )
 
     machine_brief = director_decision["machine_brief"].strip()
     assert machine_brief, "machine consultation requires a non-empty brief"
@@ -411,24 +522,33 @@ def compose_model_reply(
     machine_raw = call_anthropic(
         machine_messages,
         model=machine_model,
-        system=build_machine_code_system(session, generation),
+        system=build_machine_code_system(session, generation) + (f"\n\n{turn_guidance}" if turn_guidance else ""),
         max_tokens=MACHINE_MAX_TOKENS,
     )
     machine_result = normalize_machine_result(machine_raw)
     assert machine_result["action"] in {"command", "analysis"}
     if machine_result["action"] == "command":
-        assert machine_result["command"].startswith(("/peek ", "/patch "))
+        assert machine_result["command"].startswith(("/peek ", "/peekpage ", "/patch "))
     else:
         assert machine_result["analysis"].strip(), "machine analysis must not be empty"
 
     content = call_anthropic(
         conversation + [{"role": "user", "content": build_machine_feedback(machine_brief, machine_result)}],
         model=prose_model,
-        system=build_prose_finalizer_system(session, prose_system, generation),
+        system=build_prose_finalizer_system(session, prose_system, generation) + (f"\n\n{turn_guidance}" if turn_guidance else ""),
         max_tokens=prose_max_tokens,
     ).strip()
     assert content, "prose finalizer returned an empty response"
-    return content
+    return maybe_retry_edit_pagination(
+        content,
+        conversation=conversation,
+        user_messages=user_messages,
+        session=session,
+        prose_model=prose_model,
+        prose_system=prose_system,
+        prose_max_tokens=prose_max_tokens,
+        generation=generation,
+    )
 
 
 def active_session_count() -> int:
@@ -439,7 +559,6 @@ def make_session(goal: str = "") -> dict:
     now = time.time()
     return {
         "active": True,
-        "requests": deque(),
         "history": [],
         "goal": compact_text(goal, 240),
         "style": "",
@@ -514,15 +633,11 @@ def require_active_session(session_id: str) -> dict:
     return session
 
 
-def enforce_rate_limit(session: dict) -> None:
-    now = time.time()
-    window_start = now - 60
-    requests_window = session["requests"]
-    while requests_window and requests_window[0] < window_start:
-        requests_window.popleft()
-    if len(requests_window) >= RATE_LIMIT_PER_MINUTE:
-        raise RuntimeError(f"rate limit exceeded ({RATE_LIMIT_PER_MINUTE}/min)")
-    requests_window.append(now)
+def resolve_chat_session(session_id: str, *, fresh_chat: bool) -> dict:
+    if fresh_chat:
+        return ensure_session(session_id, revive=True)
+    ensure_session(session_id)
+    return require_active_session(session_id)
 
 
 def call_anthropic(messages: list[dict], *, model: str, system: str, max_tokens: int) -> str:
@@ -594,7 +709,6 @@ def apply_model_turn(
     scheduled_step: bool = False,
     generation: str = "",
 ) -> tuple[str, bool]:
-    enforce_rate_limit(session)
     if scheduled_step:
         enforce_step_interval(session)
     content = compose_model_reply(
@@ -738,6 +852,7 @@ def chat() -> tuple:
     payload = request.get_json(silent=True) or {}
     prompt = (payload.get("prompt") or "").strip()
     session_id = (payload.get("session") or DEFAULT_SESSION).strip() or DEFAULT_SESSION
+    fresh_chat = bool(payload.get("fresh_chat"))
     generation = compact_text(payload.get("generation", ""), 24)
     user_messages = payload.get("messages") or [{"role": "user", "content": prompt}]
 
@@ -745,8 +860,7 @@ def chat() -> tuple:
         return jsonify({"error": "expected prompt or messages"}), 400
 
     try:
-        session = ensure_session(session_id)
-        session = require_active_session(session_id)
+        session = resolve_chat_session(session_id, fresh_chat=fresh_chat)
         content, retired = apply_model_turn(
             session,
             user_messages,
@@ -770,7 +884,7 @@ def chat() -> tuple:
             "kernel_command": extract_kernel_command(content, KERNEL_COMMANDS),
             "session": session_id,
             "retired": retired,
-            "rate_limit_per_minute": RATE_LIMIT_PER_MINUTE,
+            "retired_reason": "kill-self" if retired else "",
             "steps": session["steps"],
         }
     )
@@ -886,6 +1000,7 @@ def host() -> tuple:
                     "action": action,
                     "session": session_id,
                     "retired": True,
+                    "retired_reason": "host-request",
                     "message": f"retired {session_id}",
                 }
             ),
@@ -1017,6 +1132,7 @@ def host() -> tuple:
                     "content": content,
                     "kernel_command": extract_kernel_command(content, KERNEL_COMMANDS),
                     "retired": retired,
+                    "retired_reason": "kill-self" if retired else "",
                     "steps": session["steps"],
                     "cooldown_seconds": MIN_STEP_SECONDS,
                     "message": compact_text(message, 220),

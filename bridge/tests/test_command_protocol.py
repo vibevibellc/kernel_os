@@ -1,4 +1,5 @@
 import sys
+import types
 import unittest
 from collections import deque
 from pathlib import Path
@@ -8,7 +9,40 @@ BRIDGE_DIR = Path(__file__).resolve().parents[1]
 if str(BRIDGE_DIR) not in sys.path:
     sys.path.insert(0, str(BRIDGE_DIR))
 
+if "requests" not in sys.modules:
+    requests_stub = types.ModuleType("requests")
+
+    class _DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {}
+
+    class _DummySession:
+        def __init__(self) -> None:
+            self.verify = None
+
+        def request(self, *args, **kwargs):
+            return _DummyResponse()
+
+    class _RequestException(Exception):
+        pass
+
+    class _SSLError(_RequestException):
+        pass
+
+    requests_stub.Session = _DummySession
+    requests_stub.Response = _DummyResponse
+    requests_stub.RequestException = _RequestException
+    requests_stub.exceptions = types.SimpleNamespace(SSLError=_SSLError)
+    requests_stub.post = lambda *args, **kwargs: _DummyResponse()
+    sys.modules["requests"] = requests_stub
+
 from command_protocol import extract_kernel_command, match_pending_observation
+from serial_to_anthropic import attach_recent_output as serial_attach_recent_output
+from serial_to_anthropic import format_bridge_reply as serial_format_bridge_reply
+from supervise_kernel import format_bridge_reply as supervise_format_bridge_reply
 
 
 KERNEL_COMMANDS = (
@@ -44,6 +78,12 @@ class ExtractKernelCommandTests(unittest.TestCase):
         self.assertEqual(
             extract_kernel_command("/loop", KERNEL_COMMANDS),
             "/loop",
+        )
+
+    def test_returns_exact_peekpage_command(self) -> None:
+        self.assertEqual(
+            extract_kernel_command("/peekpage 1000 0002", KERNEL_COMMANDS),
+            "/peekpage 1000 0002",
         )
 
     def test_returns_standalone_command_from_multiline_reply(self) -> None:
@@ -119,6 +159,75 @@ class MatchPendingObservationTests(unittest.TestCase):
         self.assertIsNone(payload)
         self.assertEqual(len(pending_peeks), 1)
         self.assertEqual(len(pending_patches), 1)
+
+
+class BridgeReplyFormattingTests(unittest.TestCase):
+    def test_chat_kill_self_maps_to_sys_reply(self) -> None:
+        for formatter in (serial_format_bridge_reply, supervise_format_bridge_reply):
+            with self.subTest(formatter=formatter.__module__):
+                self.assertEqual(
+                    formatter("/chat", {"retired": True, "retired_reason": "kill-self"}),
+                    "SYS: session retired by /kill-self",
+                )
+
+    def test_host_retire_request_stays_ai_text(self) -> None:
+        for formatter in (serial_format_bridge_reply, supervise_format_bridge_reply):
+            with self.subTest(formatter=formatter.__module__):
+                self.assertEqual(
+                    formatter(
+                        "/host",
+                        {
+                            "action": "retire-session",
+                            "retired": True,
+                            "retired_reason": "host-request",
+                            "message": "retired chat-00000003",
+                        },
+                    ),
+                    "AI: retired chat-00000003",
+                )
+
+    def test_host_kill_self_still_maps_to_sys_reply(self) -> None:
+        for formatter in (serial_format_bridge_reply, supervise_format_bridge_reply):
+            with self.subTest(formatter=formatter.__module__):
+                self.assertEqual(
+                    formatter("/host", {"retired": True, "retired_reason": "kill-self"}),
+                    "SYS: session retired by /kill-self",
+                )
+
+    def test_chat_command_reply_stays_cmd(self) -> None:
+        for formatter in (serial_format_bridge_reply, supervise_format_bridge_reply):
+            with self.subTest(formatter=formatter.__module__):
+                self.assertEqual(
+                    formatter("/chat", {"kernel_command": "/peek 0 10", "retired_reason": ""}),
+                    "CMD: /peek 0 10",
+                )
+
+
+class AttachRecentOutputTests(unittest.TestCase):
+    def test_attach_recent_output_appends_kernel_output_to_same_chat_session(self) -> None:
+        payload = {"prompt": "make an edit to it"}
+        recent_output = {
+            "chat-00000003": deque(
+                [
+                    "AI requested command: /peek 0000 20",
+                    "peek 0x0000: FA 31 C0 8E",
+                ]
+            )
+        }
+
+        serial_attach_recent_output(payload, "chat-00000003", recent_output)
+
+        self.assertEqual(
+            payload["messages"],
+            [
+                {
+                    "role": "user",
+                    "content": "Kernel output since your last action:\nAI requested command: /peek 0000 20\npeek 0x0000: FA 31 C0 8E",
+                },
+                {"role": "user", "content": "make an edit to it"},
+            ],
+        )
+        self.assertEqual(len(recent_output["chat-00000003"]), 0)
 
 
 if __name__ == "__main__":

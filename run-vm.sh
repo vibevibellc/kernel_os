@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DISK_PATH="${ROOT_DIR}/vm/os-disk.img"
+DISK_PATH="${DISK_PATH:-${ROOT_DIR}/vm/os-disk.img}"
 QEMU_BIN="${QEMU_BIN:-$(command -v qemu-system-x86_64)}"
 MEMORY="${MEMORY:-512M}"
 SERIAL_MODE="${SERIAL_MODE:-stdio}"
 SERIAL_SOCKET="${SERIAL_SOCKET:-${ROOT_DIR}/vm/com1.sock}"
+SERIAL_WAIT="${SERIAL_WAIT:-off}"
 KEYBOARD_LAYOUT="${KEYBOARD_LAYOUT:-en-us}"
 VIDEO_ADAPTER="${VIDEO_ADAPTER:-std}"
 DISPLAY_BACKEND="${DISPLAY_BACKEND:-cocoa,zoom-to-fit=on}"
@@ -22,7 +23,7 @@ case "${SERIAL_MODE}" in
     ;;
   socket)
     rm -f "${SERIAL_SOCKET}"
-    SERIAL_ARGS=(-chardev "socket,id=com1,path=${SERIAL_SOCKET},server=on,wait=off" -serial chardev:com1)
+    SERIAL_ARGS=(-chardev "socket,id=com1,path=${SERIAL_SOCKET},server=on,wait=${SERIAL_WAIT}" -serial chardev:com1)
     ;;
   *)
     echo "Unsupported SERIAL_MODE=${SERIAL_MODE}. Use stdio or socket." >&2

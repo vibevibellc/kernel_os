@@ -47,10 +47,10 @@ def forward_request(webhook: str, route: str, payload: dict) -> dict:
     return response.json()
 
 
-def format_bridge_reply(data: dict) -> str:
-    if data.get("retired"):
+def format_bridge_reply(route: str, data: dict) -> str:
+    if data.get("retired_reason") == "kill-self":
         return "SYS: session retired by /kill-self"
-    if data.get("kernel_command"):
+    if route == "/chat" and data.get("kernel_command"):
         return f"CMD: {sanitize_line(data['kernel_command'], 220)}"
     content = data.get("content") or data.get("message") or data.get("error") or ""
     return f"AI: {sanitize_line(content)}"
@@ -154,9 +154,9 @@ def main() -> None:
                         if route == "/chat":
                             attach_recent_output(payload, request_session, recent_output)
                         data = forward_request(args.webhook, route, payload)
-                        reply = format_bridge_reply(data)
+                        reply = format_bridge_reply(route, data)
                         command = data.get("kernel_command") or ""
-                        if command.startswith("/peek "):
+                        if command.startswith("/peek ") or command.startswith("/peekpage "):
                             pending_peeks.append({"session": request_session, "command": command})
                         if command.startswith("/patch "):
                             pending_patches.append({"session": request_session, "command": command})
