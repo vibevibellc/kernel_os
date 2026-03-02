@@ -10,8 +10,8 @@ BOOT_DIR := boot
 BRIDGE_DIR := bridge
 
 DISK := $(VM_DIR)/os-disk.img
-DISK_SIZE := 8G
 MEMORY := 512M
+DISK_SIZE := $(MEMORY)
 SERIAL_SOCKET := $(VM_DIR)/com1.sock
 WEBHOOK_PORT := 5005
 
@@ -25,7 +25,11 @@ STAGE2_MAX_BYTES := 31744
 
 disk:
 	mkdir -p $(VM_DIR)
-	test -f $(DISK) || $(QEMU_IMG) create -f raw $(DISK) $(DISK_SIZE)
+	@if [ ! -f "$(DISK)" ]; then \
+		$(QEMU_IMG) create -f raw $(DISK) $(DISK_SIZE); \
+	else \
+		$(QEMU_IMG) resize --shrink -f raw $(DISK) $(DISK_SIZE); \
+	fi
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)

@@ -1,5 +1,6 @@
 mkdir -p vm
-test -f vm/os-disk.img || qemu-img create -f raw vm/os-disk.img 8G
+test -f vm/os-disk.img || qemu-img create -f raw vm/os-disk.img 512M
+qemu-img resize --shrink -f raw vm/os-disk.img 512M
 dd if=/dev/zero of=vm/os-disk.img bs=512 count=64 conv=notrunc
 64+0 records in
 64+0 records out
