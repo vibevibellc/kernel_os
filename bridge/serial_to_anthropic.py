@@ -12,7 +12,7 @@ import requests
 REQUEST_PREFIX = "POST "
 
 
-def sanitize_line(text: str, limit: int = 220) -> str:
+def sanitize_line(text: str, limit: int = 480) -> str:
     compact = " ".join(text.replace("\r", " ").replace("\n", " ").split())
     return compact[:limit] if compact else "ok"
 

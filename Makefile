@@ -1,7 +1,7 @@
 QEMU ?= qemu-system-x86_64
 QEMU_IMG ?= qemu-img
 NASM ?= nasm
-PYTHON ?= python3
+PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
 VM_DIR := vm
 BUILD_DIR := build
@@ -20,7 +20,7 @@ STAGE1_BIN := $(BUILD_DIR)/stage1.bin
 STAGE2_BIN := $(BUILD_DIR)/stage2.bin
 STAGE2_MAX_BYTES := 31744
 
-.PHONY: disk boot run run-headless run-chat webhook bridge operator clean
+.PHONY: disk boot run run-raw run-headless run-chat webhook bridge operator clean
 
 disk:
 	mkdir -p $(VM_DIR)
@@ -46,6 +46,10 @@ boot: disk $(STAGE1_BIN) $(STAGE2_BIN)
 	dd if=$(STAGE2_BIN) of=$(DISK) bs=512 seek=1 conv=notrunc
 
 run: boot
+	chmod +x ./run-stack.sh
+	PYTHON_BIN=$(PYTHON) MEMORY=$(MEMORY) QEMU_BIN=$(QEMU) WEBHOOK_PORT=$(WEBHOOK_PORT) SERIAL_SOCKET=$(SERIAL_SOCKET) ./run-stack.sh
+
+run-raw: boot
 	MEMORY=$(MEMORY) QEMU_BIN=$(QEMU) ./run-vm.sh
 
 run-headless: boot

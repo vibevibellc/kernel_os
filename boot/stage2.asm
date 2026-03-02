@@ -98,6 +98,10 @@ do_chat:
     call chat_program
     ret
 
+do_curl:
+    call curl_program
+    ret
+
 do_hostreq:
     call hostreq_program
     ret
@@ -241,6 +245,7 @@ poll_input_char:
 .keyboard_ready:
     xor ah, ah
     int 0x16
+    call keyboard_translate_key
     test al, al
     jnz .done
 
@@ -258,6 +263,38 @@ poll_input_char:
     pop si
     pop dx
     pop cx
+    pop bx
+    ret
+
+keyboard_translate_key:
+    push bx
+    push dx
+
+    mov dl, al
+    xor bh, bh
+    mov bl, ah
+    cmp bl, 0x80
+    jae .fallback
+
+    mov ah, 0x02
+    int 0x16
+    test al, 0x03
+    jz .unshifted
+    mov al, [keymap_shifted + bx]
+    jmp .mapped
+
+.unshifted:
+    mov al, [keymap_unshifted + bx]
+
+.mapped:
+    test al, al
+    jnz .done
+
+.fallback:
+    mov al, dl
+
+.done:
+    pop dx
     pop bx
     ret
 
@@ -1040,6 +1077,37 @@ chat_send_request:
     call serial_write_string
     mov si, newline
     call serial_write_string
+    ret
+
+curl_program:
+    call set_text_mode
+    mov si, msg_curl_intro
+    call print_string
+
+.loop:
+    mov si, prompt_curl
+    call print_string
+    mov di, task_arg_buffer
+    mov cx, TASK_GOAL_SIZE - 1
+    call read_line
+    cmp byte [task_arg_buffer], 0
+    je .exit
+
+    mov si, task_arg_buffer
+    mov di, cmd_exit
+    call streq
+    cmp al, 1
+    je .exit
+
+    mov si, msg_curl_wait
+    call print_string
+    call host_send_curl_request
+    call host_read_response
+    jmp .loop
+
+.exit:
+    mov si, msg_curl_exit
+    call print_string
     ret
 
 hostreq_program:
@@ -1939,6 +2007,20 @@ host_send_step_request:
     call serial_write_string
     ret
 
+host_send_curl_request:
+    mov si, msg_host_post_curl_prefix
+    call serial_write_string
+    mov si, task_arg_buffer
+    call serial_write_json_escaped
+    mov si, msg_json_quote
+    call serial_write_string
+    call serial_write_generation_field
+    mov si, msg_json_close
+    call serial_write_string
+    mov si, newline
+    call serial_write_string
+    ret
+
 host_send_clone_request:
     mov si, msg_host_post_clone_prefix
     call serial_write_string
@@ -2558,6 +2640,7 @@ command_table:
     dw cmd_memory_map, do_memory_map
     dw cmd_calc, do_calc
     dw cmd_chat, do_chat
+    dw cmd_curl, do_curl
     dw cmd_hostreq, do_hostreq
     dw cmd_task_spawn, do_task_spawn
     dw cmd_task_list, do_task_list
@@ -2574,13 +2657,14 @@ command_table:
     dw 0, 0
 
 msg_banner db "stage2: command monitor ready", 13, 10, 0
-msg_hint db "help, hardware_list, memory_map, calc, chat, hostreq, task_spawn, task_list, task_retire, task_step, graph, paint, edit, peek, clear, about, halt, reboot", 13, 10, 13, 10, 0
+msg_hint db "help, hardware_list, memory_map, calc, chat, curl, hostreq, task_spawn, task_list, task_retire, task_step, graph, paint, edit, peek, clear, about, halt, reboot", 13, 10, 13, 10, 0
 msg_help db "commands:", 13, 10
          db " help           show command list", 13, 10
          db " hardware_list  list hardware actions wired in this stage", 13, 10
          db " memory_map     query BIOS E820 memory map", 13, 10
          db " calc           integer calculator REPL", 13, 10
          db " chat           send prompts over COM1 to the host bridge", 13, 10
+         db " curl           fetch a webpage through the host bridge", 13, 10
          db " hostreq        send structured host control requests", 13, 10
          db " task_spawn     create a supervised task slot and host session", 13, 10
          db " task_list      show local task slots and host session summary", 13, 10
@@ -2628,6 +2712,9 @@ msg_chat_intro db "chat: type a prompt, wait for the host bridge, blank line or 
 msg_chat_wait db "waiting for host response...", 13, 10, 0
 msg_chat_exit db "leaving chat", 13, 10, 0
 msg_chat_post_prefix db 'POST /chat {"session":"kernel-main","prompt":"', 0
+msg_curl_intro db "curl: fetch a URL through the host bridge. blank line or exit returns.", 13, 10, 0
+msg_curl_wait db "waiting for webpage...", 13, 10, 0
+msg_curl_exit db "leaving curl", 13, 10, 0
 msg_peek_intro db "peek: inspect bytes from the live stage2 image", 13, 10, 0
 msg_peek_bad db "peek syntax: offset and count are required hex values, count 1..20", 13, 10, 0
 msg_peek_header db "peek 0x", 0
@@ -2668,6 +2755,7 @@ msg_host_post_spawn_mid db '","goal":"', 0
 msg_host_post_retire_prefix db 'POST /host {"action":"retire-session","session":"', 0
 msg_host_post_step_prefix db 'POST /host {"action":"step-session","session":"', 0
 msg_host_post_step_mid db '","prompt":"', 0
+msg_host_post_curl_prefix db 'POST /host {"action":"fetch-url","url":"', 0
 msg_host_post_clone_prefix db 'POST /host {"action":"clone-session","session":"', 0
 msg_host_post_adopt_prefix db 'POST /host {"action":"adopt-style","session":"', 0
 msg_host_post_clone_mid db '","source_session":"', 0
@@ -2689,6 +2777,7 @@ msg_editor_exit db "leaving editor", 13, 10, 0
 prompt db "kernel_os> ", 0
 prompt_calc db "calc> ", 0
 prompt_chat db "chat> ", 0
+prompt_curl db "url> ", 0
 prompt_host_action db "host action> ", 0
 prompt_task_session db "session> ", 0
 prompt_task_goal db "goal> ", 0
@@ -2703,6 +2792,7 @@ cmd_hardware_list db "hardware_list", 0
 cmd_memory_map db "memory_map", 0
 cmd_calc db "calc", 0
 cmd_chat db "chat", 0
+cmd_curl db "curl", 0
 cmd_hostreq db "hostreq", 0
 cmd_task_spawn db "task_spawn", 0
 cmd_task_list db "task_list", 0
@@ -2761,3 +2851,38 @@ editor_length dw 0
 editor_buffer times EDITOR_CAPACITY db 0
 serial_line_buffer times SERIAL_LINE_MAX + 1 db 0
 hex_digits db "0123456789ABCDEF"
+keymap_unshifted:
+    times 0x02 db 0
+    db '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '='
+    db 0x08
+    db 0x09
+    db 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']'
+    db 0x0d
+    db 0
+    db 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', 0x27, '`'
+    db 0
+    db 0x5c
+    db 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/'
+    db 0
+    db '*'
+    db 0
+    db ' '
+    times (128 - ($ - keymap_unshifted)) db 0
+
+keymap_shifted:
+    times 0x02 db 0
+    db '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+'
+    db 0x08
+    db 0x09
+    db 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}'
+    db 0x0d
+    db 0
+    db 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', 0x22, '~'
+    db 0
+    db '|'
+    db 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?'
+    db 0
+    db '*'
+    db 0
+    db ' '
+    times (128 - ($ - keymap_shifted)) db 0

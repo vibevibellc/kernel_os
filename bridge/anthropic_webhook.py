@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
+import html
 import os
 import re
 import time
 from collections import deque
+from urllib.parse import urlparse
 
+import certifi
 import requests
+import urllib3
 from flask import Flask, jsonify, request
 
 
@@ -18,6 +22,10 @@ MAX_SESSIONS = int(os.getenv("AGENT_MAX_SESSIONS", "4"))
 MAX_HISTORY_MESSAGES = int(os.getenv("AGENT_HISTORY_MESSAGES", "12"))
 MIN_STEP_SECONDS = int(os.getenv("AGENT_MIN_STEP_SECONDS", "600"))
 DEFAULT_SESSION = os.getenv("AGENT_DEFAULT_SESSION", "kernel-main")
+REQUESTS_CA_BUNDLE = os.getenv("REQUESTS_CA_BUNDLE", certifi.where())
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
+ALLOW_INSECURE_HTTPS = os.getenv("ALLOW_INSECURE_HTTPS", "0") == "1"
+AUTO_RETRY_INSECURE_HTTPS = os.getenv("AUTO_RETRY_INSECURE_HTTPS", "1") == "1"
 KERNEL_COMMANDS = (
     "help",
     "hardware_list",
@@ -67,6 +75,10 @@ Iteration policy:
 
 app = Flask(__name__)
 SESSION_STATE: dict[str, dict] = {}
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.verify = False if ALLOW_INSECURE_HTTPS else REQUESTS_CA_BUNDLE
+if ALLOW_INSECURE_HTTPS or AUTO_RETRY_INSECURE_HTTPS:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def compact_text(text: str, limit: int = 160) -> str:
@@ -74,6 +86,50 @@ def compact_text(text: str, limit: int = 160) -> str:
     if not compact:
         return ""
     return compact[:limit]
+
+
+def request_with_tls_retry(method: str, url: str, **kwargs) -> requests.Response:
+    try:
+        return HTTP_SESSION.request(method, url, **kwargs)
+    except requests.exceptions.SSLError:
+        if not AUTO_RETRY_INSECURE_HTTPS or ALLOW_INSECURE_HTTPS:
+            raise
+        insecure_session = requests.Session()
+        insecure_session.verify = False
+        return insecure_session.request(method, url, **kwargs)
+
+
+def extract_web_text(body: str, content_type: str) -> str:
+    text = body or ""
+    if "html" in content_type.lower():
+        text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", text)
+        text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = html.unescape(text)
+    return compact_text(text, 360)
+
+
+def fetch_url_summary(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("url must start with http:// or https://")
+
+    response = request_with_tls_retry(
+        "GET",
+        url,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        allow_redirects=True,
+        headers={"user-agent": "kernel-os-curl/0.1"},
+    )
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "unknown")
+    summary = extract_web_text(response.text, content_type)
+    if not summary:
+        summary = "(empty body)"
+    return compact_text(
+        f"{response.status_code} {response.url} [{content_type}] {summary}",
+        440,
+    )
 
 
 def extract_text(data: dict) -> str:
@@ -215,7 +271,8 @@ def call_anthropic(messages: list[dict], *, model: str, system: str, max_tokens:
         "anthropic-version": ANTHROPIC_VERSION,
     }
 
-    response = requests.post(
+    response = request_with_tls_retry(
+        "POST",
         ANTHROPIC_API_URL,
         json=body,
         headers=headers,
@@ -416,10 +473,9 @@ def host() -> tuple:
             200,
         )
 
-    if not session_id:
-        return jsonify({"error": "expected session"}), 400
-
     if action == "spawn-session":
+        if not session_id:
+            return jsonify({"error": "expected session"}), 400
         existing = SESSION_STATE.get(session_id)
         if existing and existing["active"]:
             return jsonify({"error": f"session '{session_id}' already active"}), 409
@@ -445,6 +501,8 @@ def host() -> tuple:
         )
 
     if action == "clone-session":
+        if not session_id:
+            return jsonify({"error": "expected session"}), 400
         if not source_session_id:
             return jsonify({"error": "expected source_session"}), 400
         source = SESSION_STATE.get(source_session_id)
@@ -479,6 +537,8 @@ def host() -> tuple:
         )
 
     if action == "retire-session":
+        if not session_id:
+            return jsonify({"error": "expected session"}), 400
         session = SESSION_STATE.get(session_id)
         if session is None:
             return jsonify({"error": f"session '{session_id}' was not found"}), 404
@@ -497,6 +557,8 @@ def host() -> tuple:
         )
 
     if action == "adopt-style":
+        if not session_id:
+            return jsonify({"error": "expected session"}), 400
         if not source_session_id:
             return jsonify({"error": "expected source_session"}), 400
         source = SESSION_STATE.get(source_session_id)
@@ -524,6 +586,8 @@ def host() -> tuple:
         )
 
     if action == "record-observation":
+        if not session_id:
+            return jsonify({"error": "expected session"}), 400
         observation = compact_text(payload.get("observation", ""), 320)
         kind = compact_text(payload.get("kind", ""), 32)
         origin = compact_text(payload.get("origin", ""), 96)
@@ -549,7 +613,28 @@ def host() -> tuple:
             200,
         )
 
+    if action == "fetch-url":
+        url = compact_text(payload.get("url", ""), 240)
+        if not url:
+            return jsonify({"error": "expected url"}), 400
+        try:
+            content = fetch_url_summary(url)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except requests.RequestException as exc:
+            return jsonify({"error": str(exc)}), 502
+        return jsonify(
+            {
+                "action": action,
+                "url": url,
+                "content": content,
+                "message": compact_text(content, 220),
+            }
+        )
+
     if action == "step-session":
+        if not session_id:
+            return jsonify({"error": "expected session"}), 400
         try:
             session = require_active_session(session_id)
             content, retired = apply_model_turn(

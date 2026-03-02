@@ -18,7 +18,7 @@ REQUEST_PREFIX = "POST "
 PEEK_OUTPUT_PATTERN = re.compile(r"^peek 0x[0-9A-Fa-f]+:\s")
 
 
-def sanitize_line(text: str, limit: int = 220) -> str:
+def sanitize_line(text: str, limit: int = 480) -> str:
     compact = " ".join(text.replace("\r", " ").replace("\n", " ").split())
     return compact[:limit] if compact else "ok"
 
