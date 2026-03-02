@@ -65,15 +65,3 @@ The kernel prints `CMD:` lines when the bridge receives slash commands (`/task_l
 - `ANTHROPIC_MOCK=1` skips real Anthropic calls for offline testing.
 - The serial bridge runs on COM1; do not expose its socket to untrusted networks—run it locally or behind a trusted proxy.
 
-## Security & hygiene
-
-- Never commit `ANTHROPIC_SECRET_KEY`, disk images, or `.env` files to version control. This repo already ignores `.env*`, `.build/`, and `vm/` artifacts in `.gitignore`.
-- Keep the webhook and serial bridge on localhost unless you audit and harden the Flask interface first.
-- Disable or tightly control `/paint`/`/hostreq` automation when sharing the disk image publicly; they execute monitor commands and should stay in supervised environments.
-- Log files (`*.log`, `logs/`) are ignored; rotate and store them securely in production deployments.
-
-## Next steps
-
-1. Run `make boot` + `make run-chat` in a disposable environment to verify the bridge pipeline.
-2. Extend supervised sessions with `bridge/operator_cli.py` for structured workflows.
-3. Keep dependencies pinned (`.venv/`, `requirements.txt`) and refresh the README if the workflow changes.
