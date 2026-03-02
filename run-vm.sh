@@ -11,6 +11,7 @@ SERIAL_WAIT="${SERIAL_WAIT:-off}"
 KEYBOARD_LAYOUT="${KEYBOARD_LAYOUT:-en-us}"
 VIDEO_ADAPTER="${VIDEO_ADAPTER:-std}"
 DISPLAY_BACKEND="${DISPLAY_BACKEND:-cocoa,zoom-to-fit=on}"
+DISK_LOCKING="${DISK_LOCKING:-off}"
 
 if [[ ! -f "${DISK_PATH}" ]]; then
   echo "Missing disk image at ${DISK_PATH}. Run 'make disk' first." >&2
@@ -51,7 +52,7 @@ exec "${QEMU_BIN}" \
   -vga "${VIDEO_ADAPTER}" \
   -m "${MEMORY}" \
   -smp 1 \
-  -drive file="${DISK_PATH}",format=raw,if=ide \
+  -drive file="${DISK_PATH}",file.locking="${DISK_LOCKING}",format=raw,if=ide \
   -boot order=c \
   "${SERIAL_ARGS[@]}" \
   "${DISPLAY_ARGS[@]}" \

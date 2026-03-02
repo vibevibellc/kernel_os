@@ -81,7 +81,9 @@ If the model emits `/kill-self`, the bridge marks that explicitly and the kernel
 - Outbound HTTPS from the webhook now uses `certifi` by default via `REQUESTS_CA_BUNDLE`. Override that env var only if you need a custom CA bundle.
 - If your host still fails TLS verification because of a broken or intercepted certificate chain, set `ALLOW_INSECURE_HTTPS=1` before starting the webhook to skip HTTPS verification entirely.
 - QEMU now forces `KEYBOARD_LAYOUT=en-us` by default in `run-vm.sh`. Override that env var only if your host layout really differs.
+- QEMU now opens `vm/os-disk.img` with `file.locking=off` by default in `run-vm.sh`, so multiple VM processes can boot the same raw image concurrently. This is intentionally unsafe; concurrent guest writes can corrupt the shared disk. Set `DISK_LOCKING=on` if you want QEMU's normal exclusive lock back.
 - For serial automation, set `SERIAL_MODE=socket` and `SERIAL_WAIT=on` so QEMU waits for the client before the BIOS monitor starts writing COM1 output.
+- If you run multiple bridged stacks at once, give each one its own `SERIAL_SOCKET`, `WEBHOOK_PORT`, and `SESSION_STATE_PATH`. `WEBHOOK_LOG` and `BRIDGE_LOG` are also overridable now if you want isolated logs.
 - QEMU now defaults to `-vga std` and `-display cocoa,zoom-to-fit=on`, so the window can resize and scale more cleanly on macOS. This is host-window scaling only; the guest still uses fixed BIOS text mode and mode `13h` graphics until VBE support exists in the kernel.
 - Keep `ANTHROPIC_SECRET_KEY` in the local `.env` and never commit it. `ANTHROPIC_PROSE_MODEL` is the operator-facing lead model and `ANTHROPIC_MACHINE_CODE_MODEL` is the byte-level specialist; both default to `claude-haiku-4-5-20251001` unless you override them.
 - `ANTHROPIC_DIRECTOR_MAX_TOKENS` and `ANTHROPIC_MACHINE_MAX_TOKENS` cap the internal director and machine-specialist subcalls. The outward reply still uses the regular `max_tokens` request field.

@@ -8,9 +8,9 @@ MEMORY="${MEMORY:-512M}"
 WEBHOOK_PORT="${WEBHOOK_PORT:-5005}"
 SERIAL_SOCKET="${SERIAL_SOCKET:-${ROOT_DIR}/vm/com1.sock}"
 QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
-WEBHOOK_LOG="${ROOT_DIR}/vm/webhook.log"
-BRIDGE_LOG="${ROOT_DIR}/vm/bridge.log"
-SESSION_STATE_PATH="${ROOT_DIR}/vm/session_state.json"
+WEBHOOK_LOG="${WEBHOOK_LOG:-${ROOT_DIR}/vm/webhook.log}"
+BRIDGE_LOG="${BRIDGE_LOG:-${ROOT_DIR}/vm/bridge.log}"
+SESSION_STATE_PATH="${SESSION_STATE_PATH:-${ROOT_DIR}/vm/session_state.json}"
 WEBHOOK_URL="http://127.0.0.1:${WEBHOOK_PORT}"
 log_tail_pid=""
 
@@ -43,7 +43,8 @@ trap cleanup EXIT INT TERM
 rm -f "${SERIAL_SOCKET}"
 
 echo "starting webhook on ${WEBHOOK_URL}"
-PYTHONUNBUFFERED=1 WEBHOOK_PORT="${WEBHOOK_PORT}" "${PYTHON_BIN}" "${ROOT_DIR}/bridge/anthropic_webhook.py" \
+PYTHONUNBUFFERED=1 WEBHOOK_PORT="${WEBHOOK_PORT}" SESSION_STATE_PATH="${SESSION_STATE_PATH}" \
+  "${PYTHON_BIN}" "${ROOT_DIR}/bridge/anthropic_webhook.py" \
   >"${WEBHOOK_LOG}" 2>&1 &
 webhook_pid=$!
 
