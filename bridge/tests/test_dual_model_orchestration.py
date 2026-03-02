@@ -471,5 +471,14 @@ class ChatAndHostRouteTests(unittest.TestCase):
         self.assertEqual(data["session"], "chat-0004")
 
 
+class PromptSurfaceTests(unittest.TestCase):
+    def test_system_prompt_mentions_ramlist_and_peek(self) -> None:
+        self.assertIn("/ramlist", webhook.SYSTEM_PROMPT)
+        self.assertIn("/peek", webhook.SYSTEM_PROMPT)
+
+    def test_kernel_commands_accept_ramlist(self) -> None:
+        self.assertIn("ramlist", webhook.KERNEL_COMMANDS)
+
+
 if __name__ == "__main__":
     unittest.main()

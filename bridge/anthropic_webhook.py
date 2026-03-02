@@ -18,6 +18,11 @@ from flask import Flask, jsonify, request
 
 from command_protocol import extract_kernel_command
 from git_sync import commit_and_sync
+from kernel_capabilities import (
+    LOCAL_MONITOR_COMMANDS,
+    format_monitor_command_names,
+    format_slash_command_names,
+)
 from project_env import load_project_env
 
 
@@ -46,33 +51,15 @@ AUTO_RETRY_INSECURE_HTTPS = os.getenv("AUTO_RETRY_INSECURE_HTTPS", "1") == "1"
 SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "vm/session_state.json"))
 EDIT_INTENT_PATTERN = re.compile(r"\b(edit|patch|modify|change|rewrite|fix|adjust)\b", re.IGNORECASE)
 GIT_SYNC_SESSION = os.getenv("GIT_SYNC_SESSION", "git-sync")
-KERNEL_COMMANDS = (
-    "help",
-    "hardware_list",
-    "memory_map",
-    "calc",
-    "chat",
-    "curl",
-    "show_balance",
-    "hostreq",
-    "task_spawn",
-    "task_list",
-    "task_retire",
-    "task_step",
-    "graph",
-    "paint",
-    "edit",
-    "clear",
-    "about",
-    "halt",
-    "reboot",
-)
+KERNEL_COMMANDS = LOCAL_MONITOR_COMMANDS
+MONITOR_COMMAND_NAMES = format_monitor_command_names(KERNEL_COMMANDS)
+SLASH_COMMAND_NAMES = format_slash_command_names(KERNEL_COMMANDS)
 
-SYSTEM_PROMPT = """You are a bounded assistant attached to an experimental x86 BIOS monitor through a serial bridge.
+SYSTEM_PROMPT = f"""You are a bounded assistant attached to an experimental x86 BIOS monitor through a serial bridge.
 
 Your capabilities:
 - You can only reply with text.
-- The kernel can currently run monitor commands such as help, hardware_list, memory_map, calc, chat, hostreq, task_spawn, task_list, task_retire, task_step, graph, paint, edit, clear, about, halt, and reboot.
+- The kernel can currently run monitor commands such as {MONITOR_COMMAND_NAMES}.
 - You do not have direct network access, direct file I/O, or arbitrary hardware control.
 - Host-side supervision may run multiple logical sessions with per-session history, but the current kernel is still a cooperative monitor, not a protected multitasking OS.
 - Reply with /kill-self only if you intentionally want to halt the kernel immediately. Do not combine it with other text.
@@ -86,7 +73,7 @@ Your capabilities:
 - If you want to propose a live machine-code edit, reply with exactly one line in this format and nothing else: /patch OFFSET BYTE1 BYTE2 BYTE3 ... using hex tokens, max 32 bytes total.
 - If an edit needs more than 32 bytes, emit only the next valid /patch chunk now. After the kernel reports the result, continue with the next chunk on the next turn.
 - When patching strings or other data, make sure stale trailing bytes are overwritten or terminated correctly; do not leave old suffix bytes behind after the new content.
-- Supported kernel slash commands are /help, /hardware_list, /memory_map, /calc, /chat, /curl, /show_balance, /hostreq, /task_spawn, /task_list, /task_retire, /task_step, /graph, /paint, /edit, /clear, /about, /halt, and /reboot. Host-only control: /loop.
+- Supported kernel slash commands are {SLASH_COMMAND_NAMES}. Host-only control: /loop.
 - Prefer /peek before /patch when you are reasoning about unknown offsets or existing bytes.
 - Respect the latest operator request over any previous exploration plan. If the operator switches from inspection to editing, stop broad page walking unless they explicitly asked to continue paging.
 - Kernel observation lines added to session history, especially lines that start with "peek 0x", are ground-truth measurements from the monitor.

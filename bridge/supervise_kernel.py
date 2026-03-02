@@ -25,6 +25,7 @@ load_project_env()
 REQUEST_PREFIX = "POST "
 PROMPT_PATTERN = re.compile(r"^(?:kernel_os|chat|calc|url|session|goal|prompt|host action|source session|modifier|offset hex|count hex).*>\s*$")
 GIT_SYNC_DEBOUNCE_SECONDS = float(os.getenv("GIT_SYNC_DEBOUNCE_SECONDS", "10.0"))
+KERNEL_LINE_LIMIT = int(os.getenv("KERNEL_LINE_LIMIT", "255"))
 
 
 def sanitize_line(text: str, limit: int = 480) -> str:
@@ -101,6 +102,76 @@ def print_status(message: str) -> None:
     sys.stdout.flush()
 
 
+def detect_prompt_fragment(text: str) -> str | None:
+    stripped = text.rstrip("\r")
+    if not stripped:
+        return None
+    if PROMPT_PATTERN.match(stripped):
+        return stripped
+    return None
+
+
+def _fit_text_to_capacities(text: str, capacities: list[int]) -> list[str] | None:
+    words = text.split()
+    if not words:
+        return [""]
+
+    chunks: list[str] = []
+    word_index = 0
+    for capacity in capacities:
+        if word_index >= len(words):
+            break
+        if capacity <= 0:
+            return None
+
+        current = words[word_index]
+        if len(current) > capacity:
+            return None
+        word_index += 1
+
+        while word_index < len(words):
+            candidate = f"{current} {words[word_index]}"
+            if len(candidate) > capacity:
+                break
+            current = candidate
+            word_index += 1
+        chunks.append(current)
+
+    if word_index != len(words):
+        return None
+    return chunks
+
+
+def build_chat_relay_lines(text: str, limit: int = KERNEL_LINE_LIMIT) -> list[str]:
+    normalized = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    if len(normalized) <= limit:
+        return [normalized]
+
+    for chunk_count in range(2, 33):
+        templates = []
+        capacities = []
+        for index in range(1, chunk_count + 1):
+            if index < chunk_count:
+                template = (
+                    f"Relay {index}/{chunk_count}. Store this chunk. Do not act yet. "
+                    "Reply only waiting for more. Text: {chunk}"
+                )
+            else:
+                template = (
+                    f"Relay {index}/{chunk_count} final. Combine all earlier chunks with this one "
+                    "and act now. Text: {chunk}"
+                )
+            templates.append(template)
+            capacities.append(limit - len(template.format(chunk="")))
+
+        chunks = _fit_text_to_capacities(normalized, capacities)
+        if chunks is None or len(chunks) != chunk_count:
+            continue
+        return [template.format(chunk=chunk) for template, chunk in zip(templates, chunks)]
+
+    raise ValueError("prompt is too long to relay safely through chat")
+
+
 def record_pending_observation(
     webhook: str,
     pending_peeks: deque[dict],
@@ -172,7 +243,7 @@ def main() -> None:
     print_status(
         f"supervisor starting socket={args.socket} webhook={args.webhook} session={args.session}"
     )
-    print_status("keystrokes go straight to the kernel; Ctrl-C exits")
+    print_status("line prompts are buffered locally; long chat prompts are relayed safely; Ctrl-C exits")
     git_sync = GitSyncDebouncer(
         lambda paths: forward_request(args.webhook, "/host", {"action": "git-sync", "paths": paths}),
         lambda message: print_status(f"git sync -> {sanitize_line(message)}"),
@@ -188,6 +259,11 @@ def main() -> None:
                 pending_patches: deque[dict] = deque()
                 recent_output: dict[str, deque[str]] = {}
                 capture_session: str | None = None
+                active_prompt: str | None = None
+                operator_line_buffer = bytearray()
+                pending_chat_relay: deque[str] = deque()
+                relay_total = 0
+                relay_sent = 0
                 selector = selectors.DefaultSelector()
                 selector.register(sock, selectors.EVENT_READ, "socket")
                 if sys.stdin.isatty():
@@ -203,7 +279,56 @@ def main() -> None:
                                 data = os.read(sys.stdin.fileno(), 1)
                                 if not data:
                                     return
-                                sock.sendall(data)
+                                if pending_chat_relay:
+                                    if data == b"\x03":
+                                        raise KeyboardInterrupt
+                                    continue
+                                if active_prompt is None:
+                                    sock.sendall(data)
+                                    continue
+
+                                if data in (b"\r", b"\n"):
+                                    text = operator_line_buffer.decode("utf-8", errors="replace")
+                                    operator_line_buffer.clear()
+
+                                    if len(text) <= KERNEL_LINE_LIMIT:
+                                        write_line(sock, text)
+                                        active_prompt = None
+                                        continue
+
+                                    if active_prompt.startswith("chat>"):
+                                        try:
+                                            relay_lines = build_chat_relay_lines(text)
+                                        except ValueError as exc:
+                                            print_status(sanitize_line(str(exc)))
+                                            active_prompt = None
+                                            continue
+                                        relay_total = len(relay_lines)
+                                        relay_sent = 1
+                                        print_status(f"split long chat prompt into {relay_total} turns")
+                                        write_line(sock, relay_lines[0])
+                                        pending_chat_relay.extend(relay_lines[1:])
+                                        active_prompt = None
+                                        continue
+
+                                    print_status(
+                                        f"input exceeds {KERNEL_LINE_LIMIT} bytes for {sanitize_line(active_prompt)}; shorten it"
+                                    )
+                                    active_prompt = None
+                                    continue
+
+                                if data in (b"\x08", b"\x7f"):
+                                    if operator_line_buffer:
+                                        operator_line_buffer.pop()
+                                    continue
+
+                                if data == b"\x03":
+                                    raise KeyboardInterrupt
+
+                                byte = data[0]
+                                if byte < 32:
+                                    continue
+                                operator_line_buffer.extend(data)
                                 continue
 
                             chunk = sock.recv(4096)
@@ -218,6 +343,14 @@ def main() -> None:
                             while "\n" in line_buffer:
                                 raw_line, line_buffer = line_buffer.split("\n", 1)
                                 line = raw_line.rstrip("\r")
+                                if PROMPT_PATTERN.match(line):
+                                    active_prompt = line
+                                    operator_line_buffer.clear()
+                                    if pending_chat_relay and line.startswith("chat>"):
+                                        relay_sent += 1
+                                        print_status(f"sending relayed chat prompt chunk {relay_sent}/{relay_total}")
+                                        write_line(sock, pending_chat_relay.popleft())
+                                        active_prompt = None
                                 if not line.startswith(REQUEST_PREFIX):
                                     try:
                                         capture_session = append_kernel_output(recent_output, capture_session, line)
@@ -250,6 +383,18 @@ def main() -> None:
                                     error_reply = f"Error: {sanitize_line(str(exc))}"
                                     print_status(f"bridge error -> {error_reply}")
                                     write_line(sock, error_reply)
+
+                            prompt_fragment = detect_prompt_fragment(line_buffer)
+                            if prompt_fragment is not None:
+                                active_prompt = prompt_fragment
+                                if pending_chat_relay and prompt_fragment.startswith("chat>"):
+                                    relay_sent += 1
+                                    print_status(f"sending relayed chat prompt chunk {relay_sent}/{relay_total}")
+                                    write_line(sock, pending_chat_relay.popleft())
+                                    line_buffer = ""
+                                    active_prompt = None
+                            elif line_buffer:
+                                active_prompt = None
                 except KeyboardInterrupt:
                     print_status("supervisor exiting")
                     return

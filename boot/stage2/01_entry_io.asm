@@ -126,7 +126,7 @@ do_task_step:
     call task_step_program
     ret
 
-do_ssdlist:
+do_ramlist:
     call ramlist_program
     ret
 

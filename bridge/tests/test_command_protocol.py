@@ -40,31 +40,15 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = requests_stub
 
 from command_protocol import extract_kernel_command, match_pending_observation
+from kernel_capabilities import LOCAL_MONITOR_COMMANDS
 from serial_to_anthropic import attach_recent_output as serial_attach_recent_output
 from serial_to_anthropic import format_bridge_reply as serial_format_bridge_reply
+from supervise_kernel import build_chat_relay_lines
+from supervise_kernel import detect_prompt_fragment
 from supervise_kernel import format_bridge_reply as supervise_format_bridge_reply
 
 
-KERNEL_COMMANDS = (
-    "help",
-    "hardware_list",
-    "memory_map",
-    "calc",
-    "chat",
-    "curl",
-    "hostreq",
-    "task_spawn",
-    "task_list",
-    "task_retire",
-    "task_step",
-    "graph",
-    "paint",
-    "edit",
-    "clear",
-    "about",
-    "halt",
-    "reboot",
-)
+KERNEL_COMMANDS = LOCAL_MONITOR_COMMANDS
 
 
 class ExtractKernelCommandTests(unittest.TestCase):
@@ -84,6 +68,12 @@ class ExtractKernelCommandTests(unittest.TestCase):
         self.assertEqual(
             extract_kernel_command("/peekpage 1000 0002", KERNEL_COMMANDS),
             "/peekpage 1000 0002",
+        )
+
+    def test_returns_plain_ramlist_command(self) -> None:
+        self.assertEqual(
+            extract_kernel_command("/ramlist", KERNEL_COMMANDS),
+            "ramlist",
         )
 
     def test_returns_standalone_command_from_multiline_reply(self) -> None:
@@ -228,6 +218,27 @@ class AttachRecentOutputTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(recent_output["chat-00000003"]), 0)
+
+
+class SupervisionRelayTests(unittest.TestCase):
+    def test_detect_prompt_fragment_without_trailing_newline(self) -> None:
+        self.assertEqual(detect_prompt_fragment("chat> "), "chat> ")
+        self.assertEqual(detect_prompt_fragment("kernel_os> "), "kernel_os> ")
+        self.assertIsNone(detect_prompt_fragment("AI: hello"))
+
+    def test_build_chat_relay_lines_splits_long_prompt_within_limit(self) -> None:
+        prompt = " ".join(f"chunk{i:02d}" for i in range(40))
+
+        relay_lines = build_chat_relay_lines(prompt, limit=120)
+
+        self.assertGreater(len(relay_lines), 1)
+        for relay_line in relay_lines:
+            self.assertLessEqual(len(relay_line), 120)
+        self.assertIn("reply only waiting for more", relay_lines[0].lower())
+        self.assertIn("act now", relay_lines[-1].lower())
+
+    def test_build_chat_relay_lines_leaves_short_prompt_unchanged(self) -> None:
+        self.assertEqual(build_chat_relay_lines("peek 0000 then patch", limit=120), ["peek 0000 then patch"])
 
 
 if __name__ == "__main__":

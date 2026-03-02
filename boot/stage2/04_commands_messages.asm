@@ -11,7 +11,7 @@ command_table:
     dw cmd_task_list, do_task_list
     dw cmd_task_retire, do_task_retire
     dw cmd_task_step, do_task_step
-    dw cmd_ssdlist, do_ssdlist
+    dw cmd_ramlist, do_ramlist
     dw cmd_graph, do_graph
     dw cmd_paint, do_paint
     dw cmd_edit, do_edit
@@ -218,7 +218,7 @@ cmd_task_spawn db "task_spawn", 0
 cmd_task_list db "task_list", 0
 cmd_task_retire db "task_retire", 0
 cmd_task_step db "task_step", 0
-cmd_ssdlist db 0x72, 0x61, 0x6D, 0x6C, 0x69, 0x73, 0x74, 0x00
+cmd_ramlist db 0x72, 0x61, 0x6D, 0x6C, 0x69, 0x73, 0x74, 0x00
 cmd_graph db "graph", 0
 cmd_paint db "paint", 0
 cmd_edit db "edit", 0
