@@ -14,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from command_protocol import match_pending_observation
+from git_sync_debounce import GitSyncDebouncer
 from live_patch_persistence import persist_stage2_patch
 from project_env import load_project_env
 
@@ -23,6 +24,7 @@ load_project_env()
 
 REQUEST_PREFIX = "POST "
 PROMPT_PATTERN = re.compile(r"^(?:kernel_os|chat|calc|url|session|goal|prompt|host action|source session|modifier|offset hex|count hex).*>\s*$")
+GIT_SYNC_DEBOUNCE_SECONDS = float(os.getenv("GIT_SYNC_DEBOUNCE_SECONDS", "3.0"))
 
 
 def sanitize_line(text: str, limit: int = 480) -> str:
@@ -104,6 +106,7 @@ def record_pending_observation(
     pending_peeks: deque[dict],
     pending_patches: deque[dict],
     line: str,
+    git_sync: GitSyncDebouncer,
 ) -> None:
     payload = match_pending_observation(pending_peeks, pending_patches, line)
     if payload is None:
@@ -115,15 +118,7 @@ def record_pending_observation(
             if changed_paths:
                 changed_list = ", ".join(str(path) for path in changed_paths)
                 print_status(f"persisted live patch into source: {sanitize_line(changed_list)}")
-                sync_data = forward_request(
-                    webhook,
-                    "/host",
-                    {
-                        "action": "git-sync",
-                        "paths": [str(path) for path in changed_paths],
-                    },
-                )
-                print_status(f"git sync -> {sanitize_line(sync_data.get('message', 'ok'))}")
+                git_sync.note_changed_paths([str(path) for path in changed_paths])
         except Exception as exc:  # noqa: BLE001
             print_status(f"patch persistence error -> {sanitize_line(str(exc))}")
 
@@ -178,88 +173,96 @@ def main() -> None:
         f"supervisor starting socket={args.socket} webhook={args.webhook} session={args.session}"
     )
     print_status("keystrokes go straight to the kernel; Ctrl-C exits")
+    git_sync = GitSyncDebouncer(
+        lambda paths: forward_request(args.webhook, "/host", {"action": "git-sync", "paths": paths}),
+        lambda message: print_status(f"git sync -> {sanitize_line(message)}"),
+        debounce_seconds=GIT_SYNC_DEBOUNCE_SECONDS,
+    )
 
-    with RawTerminal():
-        while True:
-            sock = connect_socket(args.socket)
-            sock.setblocking(False)
-            pending_peeks: deque[dict] = deque()
-            pending_patches: deque[dict] = deque()
-            recent_output: dict[str, deque[str]] = {}
-            capture_session: str | None = None
-            selector = selectors.DefaultSelector()
-            selector.register(sock, selectors.EVENT_READ, "socket")
-            if sys.stdin.isatty():
-                selector.register(sys.stdin, selectors.EVENT_READ, "stdin")
+    try:
+        with RawTerminal():
+            while True:
+                sock = connect_socket(args.socket)
+                sock.setblocking(False)
+                pending_peeks: deque[dict] = deque()
+                pending_patches: deque[dict] = deque()
+                recent_output: dict[str, deque[str]] = {}
+                capture_session: str | None = None
+                selector = selectors.DefaultSelector()
+                selector.register(sock, selectors.EVENT_READ, "socket")
+                if sys.stdin.isatty():
+                    selector.register(sys.stdin, selectors.EVENT_READ, "stdin")
 
-            line_buffer = ""
-            print_status(f"connected to {args.socket}")
+                line_buffer = ""
+                print_status(f"connected to {args.socket}")
 
-            try:
-                while True:
-                    for key, _ in selector.select(timeout=0.5):
-                        if key.data == "stdin":
-                            data = os.read(sys.stdin.fileno(), 1)
-                            if not data:
-                                return
-                            sock.sendall(data)
-                            continue
-
-                        chunk = sock.recv(4096)
-                        if not chunk:
-                            raise OSError("socket closed")
-
-                        text = chunk.decode("utf-8", errors="replace")
-                        sys.stdout.write(text)
-                        sys.stdout.flush()
-                        line_buffer += text
-
-                        while "\n" in line_buffer:
-                            raw_line, line_buffer = line_buffer.split("\n", 1)
-                            line = raw_line.rstrip("\r")
-                            if not line.startswith(REQUEST_PREFIX):
-                                try:
-                                    capture_session = append_kernel_output(recent_output, capture_session, line)
-                                    record_pending_observation(args.webhook, pending_peeks, pending_patches, line)
-                                except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
-                                    print_status(f"observe error -> {sanitize_line(str(exc))}")
+                try:
+                    while True:
+                        for key, _ in selector.select(timeout=0.5):
+                            if key.data == "stdin":
+                                data = os.read(sys.stdin.fileno(), 1)
+                                if not data:
+                                    return
+                                sock.sendall(data)
                                 continue
 
-                            try:
-                                route, body = parse_kernel_line(line)
-                                payload = json.loads(body)
-                                if route == "/chat":
-                                    payload.setdefault("session", args.session)
-                                request_session = (payload.get("session") or args.session).strip() or args.session
-                                if route == "/chat":
-                                    attach_recent_output(payload, request_session, recent_output)
-                                data = forward_request(args.webhook, route, payload)
-                                reply = format_bridge_reply(route, data)
-                                command = data.get("kernel_command") or ""
-                                if command.startswith("/peek ") or command.startswith("/peekpage "):
-                                    pending_peeks.append({"session": request_session, "command": command})
-                                if command.startswith("/patch "):
-                                    pending_patches.append({"session": request_session, "command": command})
-                                if command:
-                                    recent_output.setdefault(request_session, deque(maxlen=12)).clear()
-                                    capture_session = request_session
-                                print_status(f"bridge[{request_session}] -> {reply}")
-                                write_line(sock, reply)
-                            except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
-                                error_reply = f"Error: {sanitize_line(str(exc))}"
-                                print_status(f"bridge error -> {error_reply}")
-                                write_line(sock, error_reply)
-            except KeyboardInterrupt:
-                print_status("supervisor exiting")
-                return
-            except OSError:
-                print_status("socket disconnected, retrying")
-                selector.close()
-                try:
-                    sock.close()
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                raise OSError("socket closed")
+
+                            text = chunk.decode("utf-8", errors="replace")
+                            sys.stdout.write(text)
+                            sys.stdout.flush()
+                            line_buffer += text
+
+                            while "\n" in line_buffer:
+                                raw_line, line_buffer = line_buffer.split("\n", 1)
+                                line = raw_line.rstrip("\r")
+                                if not line.startswith(REQUEST_PREFIX):
+                                    try:
+                                        capture_session = append_kernel_output(recent_output, capture_session, line)
+                                        record_pending_observation(args.webhook, pending_peeks, pending_patches, line, git_sync)
+                                    except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+                                        print_status(f"observe error -> {sanitize_line(str(exc))}")
+                                    continue
+
+                                try:
+                                    route, body = parse_kernel_line(line)
+                                    payload = json.loads(body)
+                                    if route == "/chat":
+                                        payload.setdefault("session", args.session)
+                                    request_session = (payload.get("session") or args.session).strip() or args.session
+                                    if route == "/chat":
+                                        attach_recent_output(payload, request_session, recent_output)
+                                    data = forward_request(args.webhook, route, payload)
+                                    reply = format_bridge_reply(route, data)
+                                    command = data.get("kernel_command") or ""
+                                    if command.startswith("/peek ") or command.startswith("/peekpage "):
+                                        pending_peeks.append({"session": request_session, "command": command})
+                                    if command.startswith("/patch "):
+                                        pending_patches.append({"session": request_session, "command": command})
+                                    if command:
+                                        recent_output.setdefault(request_session, deque(maxlen=12)).clear()
+                                        capture_session = request_session
+                                    print_status(f"bridge[{request_session}] -> {reply}")
+                                    write_line(sock, reply)
+                                except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+                                    error_reply = f"Error: {sanitize_line(str(exc))}"
+                                    print_status(f"bridge error -> {error_reply}")
+                                    write_line(sock, error_reply)
+                except KeyboardInterrupt:
+                    print_status("supervisor exiting")
+                    return
                 except OSError:
-                    pass
-                time.sleep(0.5)
+                    print_status("socket disconnected, retrying")
+                    selector.close()
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    time.sleep(0.5)
+    finally:
+        git_sync.close()
 
 
 if __name__ == "__main__":

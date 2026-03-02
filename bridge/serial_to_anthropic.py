@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 import requests
 
 from command_protocol import match_pending_observation
+from git_sync_debounce import GitSyncDebouncer
 from live_patch_persistence import persist_stage2_patch
 from project_env import load_project_env
 
@@ -20,6 +21,7 @@ load_project_env()
 
 REQUEST_PREFIX = "POST "
 PROMPT_PATTERN = re.compile(r"^(?:kernel_os|chat|calc|url|session|goal|prompt|host action|source session|modifier|offset hex|count hex).*>\s*$")
+GIT_SYNC_DEBOUNCE_SECONDS = float(os.getenv("GIT_SYNC_DEBOUNCE_SECONDS", "3.0"))
 
 
 def sanitize_line(text: str, limit: int = 480) -> str:
@@ -69,6 +71,7 @@ def record_pending_observation(
     pending_peeks: deque[dict],
     pending_patches: deque[dict],
     line: str,
+    git_sync: GitSyncDebouncer,
 ) -> None:
     payload = match_pending_observation(pending_peeks, pending_patches, line)
     if payload is None:
@@ -80,15 +83,7 @@ def record_pending_observation(
             if changed_paths:
                 changed_list = ", ".join(str(path) for path in changed_paths)
                 print(f"Persisted live patch into source: {sanitize_line(changed_list)}")
-                sync_data = forward_request(
-                    webhook,
-                    "/host",
-                    {
-                        "action": "git-sync",
-                        "paths": [str(path) for path in changed_paths],
-                    },
-                )
-                print(f"Git sync: {sanitize_line(sync_data.get('message', 'ok'))}")
+                git_sync.note_changed_paths([str(path) for path in changed_paths])
         except Exception as exc:  # noqa: BLE001
             print(f"Patch persistence error: {sanitize_line(str(exc))}")
 
@@ -138,58 +133,66 @@ def main() -> None:
     parser.add_argument("--webhook", default="http://127.0.0.1:5005")
     parser.add_argument("--session", default="kernel-main")
     args = parser.parse_args()
+    git_sync = GitSyncDebouncer(
+        lambda paths: forward_request(args.webhook, "/host", {"action": "git-sync", "paths": paths}),
+        lambda message: print(f"Git sync: {sanitize_line(message)}"),
+        debounce_seconds=GIT_SYNC_DEBOUNCE_SECONDS,
+    )
 
-    while True:
-        sock = connect_socket(args.socket)
-        print(f"Connected to {args.socket}")
-        pending_peeks: deque[dict] = deque()
-        pending_patches: deque[dict] = deque()
-        recent_output: dict[str, deque[str]] = {}
-        capture_session: str | None = None
+    try:
+        while True:
+            sock = connect_socket(args.socket)
+            print(f"Connected to {args.socket}")
+            pending_peeks: deque[dict] = deque()
+            pending_patches: deque[dict] = deque()
+            recent_output: dict[str, deque[str]] = {}
+            capture_session: str | None = None
 
-        try:
-            with sock:
-                reader = sock.makefile("r", encoding="utf-8", errors="replace", newline="\n")
-                for raw_line in reader:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
+            try:
+                with sock:
+                    reader = sock.makefile("r", encoding="utf-8", errors="replace", newline="\n")
+                    for raw_line in reader:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
 
-                    print(f"Kernel sent: {line}")
-                    if not line.startswith(REQUEST_PREFIX):
+                        print(f"Kernel sent: {line}")
+                        if not line.startswith(REQUEST_PREFIX):
+                            try:
+                                capture_session = append_kernel_output(recent_output, capture_session, line)
+                                record_pending_observation(args.webhook, pending_peeks, pending_patches, line, git_sync)
+                            except Exception as exc:  # noqa: BLE001
+                                print(f"Observation error: {sanitize_line(str(exc))}")
+                            continue
+
                         try:
-                            capture_session = append_kernel_output(recent_output, capture_session, line)
-                            record_pending_observation(args.webhook, pending_peeks, pending_patches, line)
+                            route, body = parse_kernel_line(line)
+                            payload = json.loads(body)
+                            if route == "/chat":
+                                payload.setdefault("session", args.session)
+                            request_session = (payload.get("session") or args.session).strip() or args.session
+                            if route == "/chat":
+                                attach_recent_output(payload, request_session, recent_output)
+                            data = forward_request(args.webhook, route, payload)
+                            reply = format_bridge_reply(route, data)
+                            command = data.get("kernel_command") or ""
+                            if command.startswith("/peek ") or command.startswith("/peekpage "):
+                                pending_peeks.append({"session": request_session, "command": command})
+                            if command.startswith("/patch "):
+                                pending_patches.append({"session": request_session, "command": command})
+                            if command:
+                                recent_output.setdefault(request_session, deque(maxlen=12)).clear()
+                                capture_session = request_session
+                            print(f"Bridge replied: {reply}")
+                            write_line(sock, reply)
                         except Exception as exc:  # noqa: BLE001
-                            print(f"Observation error: {sanitize_line(str(exc))}")
-                        continue
-
-                    try:
-                        route, body = parse_kernel_line(line)
-                        payload = json.loads(body)
-                        if route == "/chat":
-                            payload.setdefault("session", args.session)
-                        request_session = (payload.get("session") or args.session).strip() or args.session
-                        if route == "/chat":
-                            attach_recent_output(payload, request_session, recent_output)
-                        data = forward_request(args.webhook, route, payload)
-                        reply = format_bridge_reply(route, data)
-                        command = data.get("kernel_command") or ""
-                        if command.startswith("/peek ") or command.startswith("/peekpage "):
-                            pending_peeks.append({"session": request_session, "command": command})
-                        if command.startswith("/patch "):
-                            pending_patches.append({"session": request_session, "command": command})
-                        if command:
-                            recent_output.setdefault(request_session, deque(maxlen=12)).clear()
-                            capture_session = request_session
-                        print(f"Bridge replied: {reply}")
-                        write_line(sock, reply)
-                    except Exception as exc:  # noqa: BLE001
-                        error_reply = f"Error: {sanitize_line(str(exc))}"
-                        print(f"Bridge replied: {error_reply}")
-                        write_line(sock, error_reply)
-        except OSError:
-            time.sleep(0.5)
+                            error_reply = f"Error: {sanitize_line(str(exc))}"
+                            print(f"Bridge replied: {error_reply}")
+                            write_line(sock, error_reply)
+            except OSError:
+                time.sleep(0.5)
+    finally:
+        git_sync.close()
 
 
 if __name__ == "__main__":
