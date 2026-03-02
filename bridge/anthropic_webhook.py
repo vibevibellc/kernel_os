@@ -510,6 +510,10 @@ def validate_director_reply(raw_text: str) -> tuple[dict | None, str | None]:
     if action == "respond":
         response = str(parsed.get("response", "")).strip()
         if response:
+            if response.startswith("/"):
+                _, issue = validate_finalizer_reply(response)
+                if issue is not None:
+                    return None, f"respond action returned an invalid direct command: {issue}"
             return {"action": "respond", "response": response}, None
         return None, "respond action requires a non-empty response"
     if action == "consult_machine":
@@ -556,7 +560,7 @@ def validate_finalizer_reply(raw_text: str) -> tuple[str | None, str | None]:
 
     command = extract_kernel_command(stripped, KERNEL_COMMANDS)
     if command is not None:
-        if stripped == command:
+        if stripped == command or stripped == f"/{command}":
             return stripped, None
         return None, "command replies must contain only the command and no extra text"
     if stripped.startswith("/"):

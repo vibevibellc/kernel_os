@@ -24,7 +24,7 @@ load_project_env()
 
 REQUEST_PREFIX = "POST "
 PROMPT_PATTERN = re.compile(r"^(?:kernel_os|chat|calc|url|session|goal|prompt|host action|source session|modifier|offset hex|count hex).*>\s*$")
-GIT_SYNC_DEBOUNCE_SECONDS = float(os.getenv("GIT_SYNC_DEBOUNCE_SECONDS", "3.0"))
+GIT_SYNC_DEBOUNCE_SECONDS = float(os.getenv("GIT_SYNC_DEBOUNCE_SECONDS", "10.0"))
 
 
 def sanitize_line(text: str, limit: int = 480) -> str:

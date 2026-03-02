@@ -241,6 +241,32 @@ class ComposeModelReplyTests(unittest.TestCase):
             call_mock.call_args_list[1].args[0][-1]["content"],
         )
 
+    def test_director_invalid_direct_patch_command_is_bounced_back_for_repair(self) -> None:
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"respond","response":"/patch 2814 68 6F 73 74 72 65 71 3A 20 6C 69 73 74 2C 20 73 70 61 77 6E 2C 20 63 6C 6F 6E 65 2C 20 72 65 74 69 72 65 2C 20 73 74 65 70"}',
+                '{"action":"respond","response":"/patch 2814 68 6F 73 74 72 65 71 3A 20 6C 69 73 74 2C 20"}',
+            ],
+        ) as call_mock:
+            content = webhook.compose_model_reply(
+                self.session,
+                self.user_messages,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/patch 2814 68 6F 73 74 72 65 71 3A 20 6C 69 73 74 2C 20")
+        self.assertEqual(call_mock.call_count, 2)
+        self.assertIn(
+            "invalid direct command",
+            call_mock.call_args_list[1].args[0][-1]["content"],
+        )
+
     def test_machine_invalid_command_is_bounced_back_for_repair(self) -> None:
         with mock.patch.object(
             webhook,
