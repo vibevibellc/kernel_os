@@ -76,7 +76,7 @@ msg_calc_result db "= ", 0
 msg_calc_div_zero db "division by zero", 13, 10, 0
 msg_calc_syntax db "syntax: <integer> <op> <integer> where op is + - * / %", 13, 10, 0
 msg_calc_exit db "leaving calculator", 13, 10, 0
-msg_chat_intro db "chat: entry starts a fresh claude session; later prompts keep context until blank line or exit. command output may feed back automatically. /loop continues autonomously; /kill-self halts the kernel.", 13, 10, 0
+msg_chat_intro db "chat: blank line or exit leaves. command output may feed back automatically. /loop continues; /kill-self halts.", 13, 10, 0
 msg_chat_wait db "waiting for host response...", 13, 10, 0
 msg_chat_loop_wait db "chat: continuing with host using the latest command output...", 13, 10, 0
 msg_chat_loop_enabled db "recursive loop enabled. the host will keep iterating until claude returns a normal answer.", 13, 10, 0
@@ -97,7 +97,7 @@ msg_peek_bad db "peek syntax: offset and count are required hex values, count 1.
 msg_peek_page_bad db "peekpage syntax: base and page are required hex values", 13, 10, 0
 msg_peek_header db "peek 0x", 0
 msg_peek_mid db ": ", 0
-msg_hostreq_intro db 0x68, 0x6F, 0x73, 0x74, 0x72, 0x65, 0x71, 0x3A, 0x20, 0x6C, 0x69, 0x73, 0x74, 0x2C, 0x20, 0x73, 0x70, 0x61, 0x77, 0x6E, 0x2C, 0x20, 0x63, 0x6C, 0x6F, 0x6E, 0x65, 0x2C, 0x20, 0x72, 0x65, 0x74, 0x69, 0x72, 0x65, 0x2C, 0x20, 0x73, 0x74, 0x65, 0x70, 0x2C, 0x20, 0x61, 0x64, 0x6F, 0x70, 0x74, 0x2C, 0x20, 0x67, 0x69, 0x74, 0x2D, 0x73, 0x79, 0x6E, 0x63, 0x0D, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+msg_hostreq_intro db "hostreq: list, spawn, clone, retire, step, adopt, git-sync", 13, 10, 0
 msg_hostreq_unknown db "unknown host action", 13, 10, 0
 msg_hostreq_exit db "leaving hostreq", 13, 10, 0
 msg_task_spawn_intro db "task_spawn: create a supervised task slot and matching host session", 13, 10, 0
@@ -137,6 +137,8 @@ msg_patch_bytes db " bytes ", 0
 msg_applying db "applying patch... hold on...", 13, 10, 0
 msg_patch_applied db "patch applied. beautiful chaos achieved.", 13, 10, 0
 msg_unknown_patch db "claude sent a malformed patch, ignoring it.", 13, 10, 0
+msg_stream_result db "stream ax=0x", 0
+msg_stream_bad db "stream syntax: 1..1F hex bytes", 13, 10, 0
 msg_host_post_list db 'POST /host {"action":"list-sessions"', 0
 msg_host_post_spawn_prefix db 'POST /host {"action":"spawn-session","session":"', 0
 msg_host_post_spawn_mid db '","goal":"', 0
@@ -235,6 +237,7 @@ cmd_ramlist_clear db "clear", 0
 curl_prefix db "/curl ", 0
 loop_prefix db "/loop", 0
 patch_prefix db "/patch ", 0
+stream_prefix db "/stream ", 0
 peek_page_prefix db "/peekpage ", 0
 peek_prefix db "/peek ", 0
 sys_retired_prefix db "SYS: session retired by /kill-self", 0

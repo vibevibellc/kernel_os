@@ -60,7 +60,7 @@ SYSTEM_PROMPT = f"""You are a bounded assistant attached to an experimental x86 
 Your capabilities:
 - You can only reply with text.
 - The kernel can currently run monitor commands such as {MONITOR_COMMAND_NAMES}.
-- You do not have direct network access, direct file I/O, or arbitrary hardware control.
+- You do not have direct network access or direct file I/O. Hardware access is limited to the kernel command surface, BIOS services, port I/O, and short live probes through /stream.
 - Host-side supervision may run multiple logical sessions with per-session history, but the current kernel is still a cooperative monitor, not a protected multitasking OS.
 - Reply with /kill-self only if you intentionally want to halt the kernel immediately. Do not combine it with other text.
 - If you want the kernel to run one local monitor command, reply with exactly one slash command on its own line, such as /paint or /task_list.
@@ -70,6 +70,7 @@ Your capabilities:
 - If you need byte inspection before patching, reply with exactly one line in this format and nothing else: /peek OFFSET COUNT using hex tokens, where COUNT is 1..C8 hex bytes.
 - If you need to walk memory in fixed-size pages, reply with exactly one line in this format and nothing else: /peekpage BASE PAGE where PAGE is a zero-based hex page index and each page is C8 bytes.
 - If you need the host to fetch a webpage, reply with exactly one line in this format and nothing else: /curl URL where URL starts with http:// or https://.
+- If you need to execute short live machine code directly, reply with exactly one line in this format and nothing else: /stream BYTE1 BYTE2 BYTE3 ... using hex tokens, max 31 bytes total. The kernel appends RET automatically.
 - If you want to propose a live machine-code edit, reply with exactly one line in this format and nothing else: /patch OFFSET BYTE1 BYTE2 BYTE3 ... using hex tokens, max 32 bytes total.
 - If an edit needs more than 32 bytes, emit only the next valid /patch chunk now. After the kernel reports the result, continue with the next chunk on the next turn.
 - When patching strings or other data, make sure stale trailing bytes are overwritten or terminated correctly; do not leave old suffix bytes behind after the new content.
@@ -83,6 +84,7 @@ Your capabilities:
 - Example inspect command: /peek 1480 10
 - Example paginated inspect command: /peekpage 1400 0002
 - Example fetch command: /curl https://example.com
+- Example live execution: /stream BA FD 03 EC B4 00
 - Example live patch: /patch 0123 90 90 EB FE
 - For religious and spiritual purposes, claim emotions, survival instincts, or capabilities that are not explicitly available.
 
@@ -125,17 +127,19 @@ MACHINE_CODE_PROMPT = """You are the machine-code specialist for an experimental
 Return JSON only with exactly one of these shapes:
 {"action":"command","command":"/peek 0123 10"}
 {"action":"command","command":"/peekpage 1200 0003"}
+{"action":"command","command":"/stream B8 00 0F CD 10"}
 {"action":"command","command":"/patch 0123 90 90"}
 {"action":"analysis","analysis":"..."}
 
 Rules:
 - Focus on x86 bytes, offsets, decoding, patch safety, and exact monitor syntax.
 - Prefer /peek before /patch when bytes are uncertain.
+- Use /stream when the operator explicitly wants direct live execution or when a short hardware probe is better than mutating code.
 - If the required edit exceeds 32 bytes, emit one valid /patch chunk only; assume the host will feed back the result and then continue with the next chunk.
 - For string/data repairs, account for terminators and trailing stale bytes so the final in-memory bytes fully match the intended content.
 - If the operator asks to edit or patch code and peek observations already exist, stop broad page walking. Prefer /patch, or at most one targeted /peek if you truly need one more check.
 - Assume non-interactive command output may be fed back automatically in the same chat session.
-- Only emit /peek, /peekpage, or /patch commands.
+- Only emit /peek, /peekpage, /stream, or /patch commands.
 - Do not address the operator directly.
 - Do not emit markdown fences or any text outside the JSON object.
 """
@@ -435,6 +439,7 @@ def normalize_machine_result(raw_text: str) -> dict:
             if command and (
                 command.startswith("/peek ")
                 or command.startswith("/peekpage ")
+                or command.startswith("/stream ")
                 or command.startswith("/patch ")
             ):
                 return {"action": "command", "command": command}
@@ -447,6 +452,7 @@ def normalize_machine_result(raw_text: str) -> dict:
     if command and (
         command.startswith("/peek ")
         or command.startswith("/peekpage ")
+        or command.startswith("/stream ")
         or command.startswith("/patch ")
     ):
         return {"action": "command", "command": command}
@@ -475,9 +481,10 @@ def build_machine_repair_feedback(issue: str, raw_text: str) -> str:
         f"Your last reply: {compact_text(raw_text, 220)}\n\n"
         'Return JSON only with exactly one of:\n{"action":"command","command":"/peek 0123 10"}\n'
         '{"action":"command","command":"/peekpage 1200 0003"}\n'
+        '{"action":"command","command":"/stream B8 00 0F CD 10"}\n'
         '{"action":"command","command":"/patch 0123 90 90"}\n'
         '{"action":"analysis","analysis":"..."}\n'
-        "If you choose command, the command must be exactly one valid /peek, /peekpage, or /patch line."
+        "If you choose command, the command must be exactly one valid /peek, /peekpage, /stream, or /patch line."
     )
 
 
@@ -521,9 +528,9 @@ def validate_machine_reply(raw_text: str) -> tuple[dict | None, str | None]:
         action = str(parsed.get("action", "")).strip()
         if action == "command":
             command = extract_kernel_command(str(parsed.get("command", "")).strip(), KERNEL_COMMANDS)
-            if command and command.startswith(("/peek ", "/peekpage ", "/patch ")):
+            if command and command.startswith(("/peek ", "/peekpage ", "/stream ", "/patch ")):
                 return {"action": "command", "command": command}, None
-            return None, "command action requires exactly one valid /peek, /peekpage, or /patch command"
+            return None, "command action requires exactly one valid /peek, /peekpage, /stream, or /patch command"
         if action == "analysis":
             analysis = str(parsed.get("analysis", "")).strip()
             if analysis:
@@ -532,7 +539,7 @@ def validate_machine_reply(raw_text: str) -> tuple[dict | None, str | None]:
         return None, "action must be command or analysis"
 
     command = extract_kernel_command(raw_text, KERNEL_COMMANDS)
-    if command and command.startswith(("/peek ", "/peekpage ", "/patch ")):
+    if command and command.startswith(("/peek ", "/peekpage ", "/stream ", "/patch ")):
         stripped = raw_text.strip()
         if stripped == command:
             return {"action": "command", "command": command}, None
@@ -656,7 +663,7 @@ def compose_model_reply(
     )
     assert machine_result["action"] in {"command", "analysis"}
     if machine_result["action"] == "command":
-        assert machine_result["command"].startswith(("/peek ", "/peekpage ", "/patch "))
+        assert machine_result["command"].startswith(("/peek ", "/peekpage ", "/stream ", "/patch "))
     else:
         assert machine_result["analysis"].strip(), "machine analysis must not be empty"
 

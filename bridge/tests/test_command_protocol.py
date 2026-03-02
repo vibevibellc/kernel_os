@@ -58,6 +58,12 @@ class ExtractKernelCommandTests(unittest.TestCase):
             "/patch 0 90",
         )
 
+    def test_returns_exact_stream_command(self) -> None:
+        self.assertEqual(
+            extract_kernel_command("/stream B8 00 0F CD 10", KERNEL_COMMANDS),
+            "/stream B8 00 0F CD 10",
+        )
+
     def test_returns_exact_loop_command(self) -> None:
         self.assertEqual(
             extract_kernel_command("/loop", KERNEL_COMMANDS),
@@ -100,6 +106,7 @@ class MatchPendingObservationTests(unittest.TestCase):
 
         payload = match_pending_observation(
             pending_peeks,
+            deque(),
             pending_patches,
             "peek 0x0000: FA 31 C0 8E",
         )
@@ -117,10 +124,12 @@ class MatchPendingObservationTests(unittest.TestCase):
 
     def test_matches_patch_result(self) -> None:
         pending_peeks = deque()
+        pending_streams = deque()
         pending_patches = deque([{"session": "kernel-main", "command": "/patch 0 90"}])
 
         payload = match_pending_observation(
             pending_peeks,
+            pending_streams,
             pending_patches,
             "patch applied. if we crash now, blame this one.",
         )
@@ -136,12 +145,36 @@ class MatchPendingObservationTests(unittest.TestCase):
         )
         self.assertEqual(len(pending_patches), 0)
 
+    def test_matches_stream_output(self) -> None:
+        pending_peeks = deque()
+        pending_streams = deque([{"session": "kernel-main", "command": "/stream B8 34 12"}])
+        pending_patches = deque()
+
+        payload = match_pending_observation(
+            pending_peeks,
+            pending_streams,
+            pending_patches,
+            "stream ax=0x1234",
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "session": "kernel-main",
+                "kind": "stream",
+                "origin": "/stream B8 34 12",
+                "observation": "stream ax=0x1234",
+            },
+        )
+        self.assertEqual(len(pending_streams), 0)
+
     def test_ignores_unmatched_lines(self) -> None:
         pending_peeks = deque([{"session": "kernel-main", "command": "/peek 0 10"}])
         pending_patches = deque([{"session": "kernel-main", "command": "/patch 0 90"}])
 
         payload = match_pending_observation(
             pending_peeks,
+            deque(),
             pending_patches,
             "generation advanced to 0x00000002",
         )

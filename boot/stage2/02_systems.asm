@@ -1209,6 +1209,34 @@ parse_patch:
     stc
     ret
 
+parse_stream:
+    call skip_spaces
+    mov word [patch_byte_count], 0
+
+.next_byte:
+    call skip_spaces
+    cmp byte [si], 0
+    je .done
+    call parse_hex_byte
+    jc .fail
+    mov bx, [patch_byte_count]
+    cmp bx, PATCH_MAX_BYTES - 1
+    jae .fail
+    mov [patch_bytes + bx], al
+    inc bx
+    mov [patch_byte_count], bx
+    jmp .next_byte
+
+.done:
+    cmp word [patch_byte_count], 0
+    je .fail
+    clc
+    ret
+
+.fail:
+    stc
+    ret
+
 parse_peek_args:
     call skip_spaces
     call parse_hex_word
@@ -1354,6 +1382,37 @@ apply_live_patch:
     call print_string
     ret
 
+execute_live_stream:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push ds
+    push es
+    mov bx, [patch_byte_count]
+    mov byte [patch_bytes + bx], 0xC3
+    call patch_bytes
+    mov [patch_offset], ax
+    pop es
+    pop ds
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    mov si, msg_stream_result
+    call print_string
+    mov ax, [patch_offset]
+    call print_hex_word_safe
+    mov si, newline
+    call print_string
+    ret
+
 peek_program:
     call set_text_mode
     mov si, msg_peek_intro
@@ -1454,6 +1513,11 @@ host_read_response:
     cmp al, 1
     je .patch
     mov si, serial_line_buffer + 5
+    mov di, stream_prefix
+    call strprefix
+    cmp al, 1
+    je .stream
+    mov si, serial_line_buffer + 5
     mov di, peek_page_prefix
     call strprefix
     cmp al, 1
@@ -1489,6 +1553,22 @@ host_read_response:
 .patch_invalid:
     mov byte [chat_loop_active], 0
     mov si, msg_unknown_patch
+    call print_string
+    mov al, 1
+    ret
+
+.stream:
+    mov si, serial_line_buffer + 13
+    call parse_stream
+    jc .stream_invalid
+    call execute_live_stream
+    call chat_enable_continuation
+    xor al, al
+    ret
+
+.stream_invalid:
+    mov byte [chat_loop_active], 0
+    mov si, msg_stream_bad
     call print_string
     mov al, 1
     ret

@@ -48,6 +48,7 @@ class VMChatSmoke:
             self.scenario_edit()
             self.scenario_loop()
             self.scenario_patch()
+            self.scenario_stream()
             self.scenario_kill_self()
         finally:
             self.save_transcript()
@@ -200,7 +201,7 @@ class VMChatSmoke:
     def enter_chat(self) -> None:
         self.send_operator_line("chat")
         self.expect(
-            r"chat: entering chat starts a fresh claude session; later prompts keep context until blank line or exit\. non-interactive command results may be fed back automatically\.",
+            r"chat: blank line or exit leaves\. command output may feed back automatically\. /loop continues; /kill-self halts\.\r\n",
             timeout=5,
         )
         self.expect(r"chat> ", timeout=5)
@@ -377,6 +378,30 @@ class VMChatSmoke:
         self.expect_auto_continue(first_payload["session"])
         self.send_host_line("AI: patch bytes confirmed")
         self.expect(r"AI: patch bytes confirmed\r\nchat> ", timeout=5)
+        self.exit_chat()
+
+    def scenario_stream(self) -> None:
+        self.log("scenario stream")
+        self.enter_chat()
+        first_payload = self.start_chat_turn("stream smoke", expect_fresh=True)
+
+        self.send_host_line("CMD: /stream B8 00 0F CD 10")
+        self.expect(r"AI requested command: /stream B8 00 0F CD 10\r\n", timeout=5)
+        self.expect(r"stream ax=0x5003\r\n", timeout=5)
+        self.expect_auto_continue(first_payload["session"])
+
+        self.send_host_line("CMD: /stream CD 11")
+        self.expect(r"AI requested command: /stream CD 11\r\n", timeout=5)
+        self.expect(r"stream ax=0x[0-9A-F]{4}\r\n", timeout=5)
+        self.expect_auto_continue(first_payload["session"])
+
+        self.send_host_line("CMD: /stream BA FD 03 EC B4 00")
+        self.expect(r"AI requested command: /stream BA FD 03 EC B4 00\r\n", timeout=5)
+        self.expect(r"stream ax=0x00[0-9A-F]{2}\r\n", timeout=5)
+        self.expect_auto_continue(first_payload["session"])
+
+        self.send_host_line("AI: stream probes complete")
+        self.expect(r"AI: stream probes complete\r\nchat> ", timeout=5)
         self.exit_chat()
 
     def scenario_kill_self(self) -> None:

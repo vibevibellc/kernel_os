@@ -150,6 +150,28 @@ class ComposeModelReplyTests(unittest.TestCase):
 
         self.assertEqual(content, "/peekpage 1400 0002")
 
+    def test_machine_consultation_can_return_stream_command(self) -> None:
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"consult_machine","machine_brief":"Run a short live hardware probe through the stream path."}',
+                '{"action":"command","command":"/stream B8 00 0F CD 10"}',
+                "/stream B8 00 0F CD 10",
+            ],
+        ):
+            content = webhook.compose_model_reply(
+                self.session,
+                self.user_messages,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/stream B8 00 0F CD 10")
+
     def test_machine_analysis_can_be_turned_into_prose(self) -> None:
         with mock.patch.object(
             webhook,
@@ -475,6 +497,7 @@ class PromptSurfaceTests(unittest.TestCase):
     def test_system_prompt_mentions_ramlist_and_peek(self) -> None:
         self.assertIn("/ramlist", webhook.SYSTEM_PROMPT)
         self.assertIn("/peek", webhook.SYSTEM_PROMPT)
+        self.assertIn("/stream", webhook.SYSTEM_PROMPT)
 
     def test_kernel_commands_accept_ramlist(self) -> None:
         self.assertIn("ramlist", webhook.KERNEL_COMMANDS)

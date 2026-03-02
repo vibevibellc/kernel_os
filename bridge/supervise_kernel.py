@@ -175,11 +175,12 @@ def build_chat_relay_lines(text: str, limit: int = KERNEL_LINE_LIMIT) -> list[st
 def record_pending_observation(
     webhook: str,
     pending_peeks: deque[dict],
+    pending_streams: deque[dict],
     pending_patches: deque[dict],
     line: str,
     git_sync: GitSyncDebouncer,
 ) -> None:
-    payload = match_pending_observation(pending_peeks, pending_patches, line)
+    payload = match_pending_observation(pending_peeks, pending_streams, pending_patches, line)
     if payload is None:
         return
 
@@ -256,6 +257,7 @@ def main() -> None:
                 sock = connect_socket(args.socket)
                 sock.setblocking(False)
                 pending_peeks: deque[dict] = deque()
+                pending_streams: deque[dict] = deque()
                 pending_patches: deque[dict] = deque()
                 recent_output: dict[str, deque[str]] = {}
                 capture_session: str | None = None
@@ -354,7 +356,14 @@ def main() -> None:
                                 if not line.startswith(REQUEST_PREFIX):
                                     try:
                                         capture_session = append_kernel_output(recent_output, capture_session, line)
-                                        record_pending_observation(args.webhook, pending_peeks, pending_patches, line, git_sync)
+                                        record_pending_observation(
+                                            args.webhook,
+                                            pending_peeks,
+                                            pending_streams,
+                                            pending_patches,
+                                            line,
+                                            git_sync,
+                                        )
                                     except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
                                         print_status(f"observe error -> {sanitize_line(str(exc))}")
                                     continue
@@ -372,6 +381,8 @@ def main() -> None:
                                     command = data.get("kernel_command") or ""
                                     if command.startswith("/peek ") or command.startswith("/peekpage "):
                                         pending_peeks.append({"session": request_session, "command": command})
+                                    if command.startswith("/stream "):
+                                        pending_streams.append({"session": request_session, "command": command})
                                     if command.startswith("/patch "):
                                         pending_patches.append({"session": request_session, "command": command})
                                     if command:

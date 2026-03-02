@@ -17,9 +17,12 @@ WEBHOOK_PORT := 5005
 
 STAGE1_SRC := $(BOOT_DIR)/stage1.asm
 STAGE2_SRC := $(BOOT_DIR)/stage2.asm
+STAGE2_PARTS := $(wildcard $(BOOT_DIR)/stage2/*.asm)
 STAGE1_BIN := $(BUILD_DIR)/stage1.bin
 STAGE2_BIN := $(BUILD_DIR)/stage2.bin
-STAGE2_MAX_BYTES := 31744
+STAGE2_LOAD_SECTORS := 1024
+BOOT_REGION_SECTORS := 1025
+STAGE2_MAX_BYTES := 524288
 
 .PHONY: disk boot run run-raw run-headless run-chat webhook bridge operator clean
 
@@ -35,9 +38,9 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(STAGE1_BIN): $(STAGE1_SRC) | $(BUILD_DIR)
-	$(NASM) $(NASMFLAGS) -f bin -o $(STAGE1_BIN) $(STAGE1_SRC)
+	$(NASM) $(NASMFLAGS) -DSTAGE2_SECTORS=$(STAGE2_LOAD_SECTORS) -f bin -o $(STAGE1_BIN) $(STAGE1_SRC)
 
-$(STAGE2_BIN): $(STAGE2_SRC) | $(BUILD_DIR)
+$(STAGE2_BIN): $(STAGE2_SRC) $(STAGE2_PARTS) | $(BUILD_DIR)
 	$(NASM) $(NASMFLAGS) -f bin -o $(STAGE2_BIN) $(STAGE2_SRC)
 
 boot: disk $(STAGE1_BIN) $(STAGE2_BIN)
@@ -46,7 +49,7 @@ boot: disk $(STAGE1_BIN) $(STAGE2_BIN)
 		echo "stage2 is $$stage2_size bytes; limit is $(STAGE2_MAX_BYTES) bytes" >&2; \
 		exit 1; \
 	fi
-	dd if=/dev/zero of=$(DISK) bs=512 count=64 conv=notrunc
+	dd if=/dev/zero of=$(DISK) bs=512 count=$(BOOT_REGION_SECTORS) conv=notrunc
 	dd if=$(STAGE1_BIN) of=$(DISK) bs=512 count=1 conv=notrunc
 	dd if=$(STAGE2_BIN) of=$(DISK) bs=512 seek=1 conv=notrunc
 

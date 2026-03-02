@@ -1,9 +1,14 @@
 [bits 16]
 [org 0x7c00]
 
-%define STAGE2_ADDR    0x8000
-%define STAGE2_SECTORS 62
-%define COM1_PORT      0x3f8
+%ifndef STAGE2_SECTORS
+%define STAGE2_SECTORS 1024
+%endif
+
+%define STAGE2_ADDR         0x8000
+%define STAGE2_SEGMENT      0x0800
+%define STAGE2_CHUNK_SECTORS 127
+%define COM1_PORT           0x3f8
 
     jmp short boot_start
     nop
@@ -32,19 +37,13 @@ flush_cs:
 
 load_stage2:
 .retry:
+    call prepare_stage2_load
     xor ah, ah
     mov dl, [boot_drive]
     int 0x13
     jc .next_try
 
-    mov ah, 0x02
-    mov al, STAGE2_SECTORS
-    mov ch, 0x00
-    mov cl, 0x02
-    mov dh, 0x00
-    mov dl, [boot_drive]
-    mov bx, STAGE2_ADDR
-    int 0x13
+    call load_stage2_lba
     jnc .success
 
 .next_try:
@@ -56,6 +55,51 @@ load_stage2:
     mov si, msg_jump
     call print_string
     jmp 0x0000:STAGE2_ADDR
+
+prepare_stage2_load:
+    mov word [stage2_remaining], STAGE2_SECTORS
+    mov word [dap_sector_count], 0
+    mov word [dap_buffer_offset], 0
+    mov word [dap_buffer_segment], STAGE2_SEGMENT
+    mov word [dap_lba_low], 1
+    mov word [dap_lba_mid], 0
+    mov word [dap_lba_high], 0
+    mov word [dap_lba_top], 0
+    ret
+
+load_stage2_lba:
+.chunk:
+    cmp word [stage2_remaining], 0
+    je .done
+    mov cx, [stage2_remaining]
+    cmp cx, STAGE2_CHUNK_SECTORS
+    jbe .count_ready
+    mov cx, STAGE2_CHUNK_SECTORS
+
+.count_ready:
+    mov [dap_sector_count], cx
+    mov bx, cx
+    shl bx, 5
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    mov si, disk_packet
+    int 0x13
+    jc .fail
+    sub word [stage2_remaining], cx
+    add word [dap_buffer_segment], bx
+    add word [dap_lba_low], cx
+    adc word [dap_lba_mid], 0
+    adc word [dap_lba_high], 0
+    adc word [dap_lba_top], 0
+    jmp .chunk
+
+.done:
+    clc
+    ret
+
+.fail:
+    stc
+    ret
 
 disk_error:
     mov si, msg_disk_error
@@ -137,6 +181,16 @@ msg_stage1 db "stage1: boot sector running", 13, 10, 0
 msg_jump db "stage1: loading stage2", 13, 10, 0
 msg_disk_error db "stage1: disk read failed", 13, 10, 0
 boot_drive db 0
+stage2_remaining dw 0
+disk_packet:
+    db 0x10, 0x00
+dap_sector_count dw 0
+dap_buffer_offset dw 0
+dap_buffer_segment dw STAGE2_SEGMENT
+dap_lba_low dw 1
+dap_lba_mid dw 0
+dap_lba_high dw 0
+dap_lba_top dw 0
 
 times 510 - ($ - $$) db 0
 dw 0xaa55
