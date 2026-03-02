@@ -50,6 +50,16 @@ ALLOW_INSECURE_HTTPS = os.getenv("ALLOW_INSECURE_HTTPS", "0") == "1"
 AUTO_RETRY_INSECURE_HTTPS = os.getenv("AUTO_RETRY_INSECURE_HTTPS", "1") == "1"
 SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "vm/session_state.json"))
 EDIT_INTENT_PATTERN = re.compile(r"\b(edit|patch|modify|change|rewrite|fix|adjust)\b", re.IGNORECASE)
+NEGATED_EDIT_HINTS = (
+    "without patching",
+    "without editing",
+    "do not patch",
+    "don't patch",
+    "dont patch",
+    "do not edit",
+    "don't edit",
+    "dont edit",
+)
 GIT_SYNC_SESSION = os.getenv("GIT_SYNC_SESSION", "git-sync")
 KERNEL_COMMANDS = LOCAL_MONITOR_COMMANDS
 MONITOR_COMMAND_NAMES = format_monitor_command_names(KERNEL_COMMANDS)
@@ -74,6 +84,7 @@ Your capabilities:
 - If you want to propose a live machine-code edit, reply with exactly one line in this format and nothing else: /patch OFFSET BYTE1 BYTE2 BYTE3 ... using hex tokens, max 32 bytes total.
 - If an edit needs more than 32 bytes, emit only the next valid /patch chunk now. After the kernel reports the result, continue with the next chunk on the next turn.
 - When patching strings or other data, make sure stale trailing bytes are overwritten or terminated correctly; do not leave old suffix bytes behind after the new content.
+- For hardware-state questions like BIOS mode queries, register reads, port I/O, or other short non-destructive probes, prefer /stream. /peek and /peekpage inspect stage2 memory bytes, not live device state.
 - Supported kernel slash commands are {SLASH_COMMAND_NAMES}. Host-only control: /loop.
 - Prefer /peek before /patch when you are reasoning about unknown offsets or existing bytes.
 - Respect the latest operator request over any previous exploration plan. If the operator switches from inspection to editing, stop broad page walking unless they explicitly asked to continue paging.
@@ -135,6 +146,7 @@ Rules:
 - Focus on x86 bytes, offsets, decoding, patch safety, and exact monitor syntax.
 - Prefer /peek before /patch when bytes are uncertain.
 - Use /stream when the operator explicitly wants direct live execution or when a short hardware probe is better than mutating code.
+- For BIOS mode queries, register reads, port I/O, and similar live hardware-state checks, prefer /stream over /peek. /peek is for stage2 memory inspection only.
 - If the required edit exceeds 32 bytes, emit one valid /patch chunk only; assume the host will feed back the result and then continue with the next chunk.
 - For string/data repairs, account for terminators and trailing stale bytes so the final in-memory bytes fully match the intended content.
 - If the operator asks to edit or patch code and peek observations already exist, stop broad page walking. Prefer /patch, or at most one targeted /peek if you truly need one more check.
@@ -340,7 +352,26 @@ def latest_operator_request(user_messages: list[dict]) -> str:
 
 
 def operator_requests_code_edit(text: str) -> bool:
-    return bool(EDIT_INTENT_PATTERN.search(text or ""))
+    normalized = " ".join((text or "").lower().split())
+    if any(hint in normalized for hint in NEGATED_EDIT_HINTS):
+        return False
+    return bool(EDIT_INTENT_PATTERN.search(normalized))
+
+
+def operator_requests_hardware_probe(text: str) -> bool:
+    normalized = " ".join((text or "").lower().split())
+    if not normalized:
+        return False
+
+    hardware_terms = ("hardware", "bios", "video mode", "video", "register", "port", "com1", "vga")
+    action_terms = ("probe", "inspect", "query", "read", "check")
+    return any(term in normalized for term in hardware_terms) and (
+        any(term in normalized for term in action_terms)
+        or "live execution" in normalized
+        or "direct live execution" in normalized
+        or "without patching" in normalized
+        or "non-destructive" in normalized
+    )
 
 
 def conversation_has_peek_observation(conversation: list[dict]) -> bool:
@@ -354,6 +385,17 @@ def conversation_has_peek_observation(conversation: list[dict]) -> bool:
 
 def build_turn_guidance(conversation: list[dict], user_messages: list[dict]) -> str:
     latest_request = latest_operator_request(user_messages)
+    if operator_requests_hardware_probe(latest_request):
+        return "\n".join(
+            [
+                f"Latest operator request: {compact_text(latest_request, 160)}",
+                "The latest request is a live hardware-state probe, not a code edit and not a stage2 memory inspection.",
+                "Prefer /stream for short BIOS queries, register reads, and port-I/O checks.",
+                "Do not use /peek or /peekpage unless the operator explicitly asks for stage2 memory bytes.",
+                "Do not use /patch unless the operator explicitly asks to mutate code.",
+            ]
+        )
+
     if not operator_requests_code_edit(latest_request):
         return ""
 
@@ -383,6 +425,15 @@ def build_edit_retry_feedback(latest_request: str) -> str:
     )
 
 
+def build_hardware_probe_retry_feedback(latest_request: str) -> str:
+    return (
+        "Correction: the operator asked for a live hardware-state probe, not a stage2 memory inspection and not a code edit.\n\n"
+        f"Latest operator request:\n{latest_request}\n\n"
+        "Do not return /peek, /peekpage, or /patch. Return exactly one short /stream command for a non-destructive BIOS or port-I/O probe, "
+        "or a concise explanation if /stream truly cannot answer the request."
+    )
+
+
 def maybe_retry_edit_pagination(
     content: str,
     *,
@@ -404,6 +455,34 @@ def maybe_retry_edit_pagination(
 
     retry_content = call_anthropic(
         conversation + [{"role": "user", "content": build_edit_retry_feedback(latest_request)}],
+        model=prose_model,
+        system=build_prose_finalizer_system(session, prose_system, generation),
+        max_tokens=prose_max_tokens,
+    ).strip()
+    return retry_content or content
+
+
+def maybe_retry_hardware_probe_command(
+    content: str,
+    *,
+    conversation: list[dict],
+    user_messages: list[dict],
+    session: dict,
+    prose_model: str,
+    prose_system: str,
+    prose_max_tokens: int,
+    generation: str,
+) -> str:
+    latest_request = latest_operator_request(user_messages)
+    if not operator_requests_hardware_probe(latest_request):
+        return content
+
+    stripped = content.strip()
+    if not stripped.startswith(("/peek ", "/peekpage ", "/patch ")):
+        return content
+
+    retry_content = call_anthropic(
+        conversation + [{"role": "user", "content": build_hardware_probe_retry_feedback(latest_request)}],
         model=prose_model,
         system=build_prose_finalizer_system(session, prose_system, generation),
         max_tokens=prose_max_tokens,
@@ -638,6 +717,16 @@ def compose_model_reply(
     if director_decision["action"] == "respond":
         content = director_decision["response"].strip()
         assert content, "prose director returned an empty response"
+        content = maybe_retry_hardware_probe_command(
+            content,
+            conversation=conversation,
+            user_messages=user_messages,
+            session=session,
+            prose_model=prose_model,
+            prose_system=prose_system,
+            prose_max_tokens=prose_max_tokens,
+            generation=generation,
+        )
         return maybe_retry_edit_pagination(
             content,
             conversation=conversation,
@@ -677,6 +766,16 @@ def compose_model_reply(
         fallback_normalizer=lambda raw_text: raw_text.strip(),
     ).strip()
     assert content, "prose finalizer returned an empty response"
+    content = maybe_retry_hardware_probe_command(
+        content,
+        conversation=conversation,
+        user_messages=user_messages,
+        session=session,
+        prose_model=prose_model,
+        prose_system=prose_system,
+        prose_max_tokens=prose_max_tokens,
+        generation=generation,
+    )
     return maybe_retry_edit_pagination(
         content,
         conversation=conversation,

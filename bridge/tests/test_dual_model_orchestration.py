@@ -172,6 +172,41 @@ class ComposeModelReplyTests(unittest.TestCase):
 
         self.assertEqual(content, "/stream B8 00 0F CD 10")
 
+    def test_hardware_probe_peek_reply_is_bounced_to_stream(self) -> None:
+        hardware_prompt = [
+            {
+                "role": "user",
+                "content": (
+                    "Probe current BIOS video mode without patching anything. "
+                    "Use direct live execution if available and keep it non-destructive."
+                ),
+            }
+        ]
+
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"respond","response":"/peek 0040 10"}',
+                "/stream B8 00 0F CD 10",
+            ],
+        ) as call_mock:
+            content = webhook.compose_model_reply(
+                self.session,
+                hardware_prompt,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, "/stream B8 00 0F CD 10")
+        self.assertIn(
+            "live hardware-state probe",
+            call_mock.call_args_list[1].args[0][-1]["content"],
+        )
+
     def test_machine_analysis_can_be_turned_into_prose(self) -> None:
         with mock.patch.object(
             webhook,
@@ -498,9 +533,17 @@ class PromptSurfaceTests(unittest.TestCase):
         self.assertIn("/ramlist", webhook.SYSTEM_PROMPT)
         self.assertIn("/peek", webhook.SYSTEM_PROMPT)
         self.assertIn("/stream", webhook.SYSTEM_PROMPT)
+        self.assertIn("hardware-state questions", webhook.SYSTEM_PROMPT)
 
     def test_kernel_commands_accept_ramlist(self) -> None:
         self.assertIn("ramlist", webhook.KERNEL_COMMANDS)
+
+    def test_without_patching_phrase_is_not_treated_as_edit_request(self) -> None:
+        self.assertFalse(
+            webhook.operator_requests_code_edit(
+                "Probe current BIOS video mode without patching anything."
+            )
+        )
 
 
 if __name__ == "__main__":
