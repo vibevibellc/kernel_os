@@ -1,5 +1,7 @@
 # kernel_os playground
 
+Python + Machine Code
+
 Minimal BIOS playground that boots a two-stage loader on a raw disk image, pairs it with a Flask webhook, and bridges COM1 output to Anthropic-backed supervised sessions.
 
 ## Key components
