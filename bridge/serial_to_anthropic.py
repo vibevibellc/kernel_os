@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 import requests
 
 from command_protocol import match_pending_observation
+from live_patch_persistence import persist_stage2_patch
 from project_env import load_project_env
 
 
@@ -72,6 +73,15 @@ def record_pending_observation(
     payload = match_pending_observation(pending_peeks, pending_patches, line)
     if payload is None:
         return
+
+    if payload.get("kind") == "patch":
+        try:
+            changed_paths = persist_stage2_patch(payload["origin"], payload["observation"])
+            if changed_paths:
+                changed_list = ", ".join(str(path) for path in changed_paths)
+                print(f"Persisted live patch into source: {sanitize_line(changed_list)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Patch persistence error: {sanitize_line(str(exc))}")
 
     data = forward_request(webhook, "/host", {
         "action": "record-observation",
