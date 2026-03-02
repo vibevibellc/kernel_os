@@ -84,6 +84,8 @@ Your capabilities:
 - If you need to walk memory in fixed-size pages, reply with exactly one line in this format and nothing else: /peekpage BASE PAGE where PAGE is a zero-based hex page index and each page is C8 bytes.
 - If you need the host to fetch a webpage, reply with exactly one line in this format and nothing else: /curl URL where URL starts with http:// or https://.
 - If you want to propose a live machine-code edit, reply with exactly one line in this format and nothing else: /patch OFFSET BYTE1 BYTE2 BYTE3 ... using hex tokens, max 32 bytes total.
+- If an edit needs more than 32 bytes, emit only the next valid /patch chunk now. After the kernel reports the result, continue with the next chunk on the next turn.
+- When patching strings or other data, make sure stale trailing bytes are overwritten or terminated correctly; do not leave old suffix bytes behind after the new content.
 - Supported kernel slash commands are /help, /hardware_list, /memory_map, /calc, /chat, /curl, /show_balance, /hostreq, /task_spawn, /task_list, /task_retire, /task_step, /graph, /paint, /edit, /clear, /about, /halt, and /reboot. Host-only control: /loop.
 - Prefer /peek before /patch when you are reasoning about unknown offsets or existing bytes.
 - Respect the latest operator request over any previous exploration plan. If the operator switches from inspection to editing, stop broad page walking unless they explicitly asked to continue paging.
@@ -142,6 +144,8 @@ Return JSON only with exactly one of these shapes:
 Rules:
 - Focus on x86 bytes, offsets, decoding, patch safety, and exact monitor syntax.
 - Prefer /peek before /patch when bytes are uncertain.
+- If the required edit exceeds 32 bytes, emit one valid /patch chunk only; assume the host will feed back the result and then continue with the next chunk.
+- For string/data repairs, account for terminators and trailing stale bytes so the final in-memory bytes fully match the intended content.
 - If the operator asks to edit or patch code and peek observations already exist, stop broad page walking. Prefer /patch, or at most one targeted /peek if you truly need one more check.
 - Assume non-interactive command output may be fed back automatically in the same chat session.
 - Only emit /peek, /peekpage, or /patch commands.
