@@ -58,7 +58,10 @@ main_loop:
     cmp byte [input_buffer], 0
     je main_loop
     call dispatch_command
+    cmp byte [monitor_auto_clear], 1
+    jne .skip_clear
     call clear_console
+.skip_clear:
     call do_help
     jmp main_loop
 
@@ -178,6 +181,10 @@ do_view:
 
 do_pm32:
     call protected_mode_program
+    ret
+
+do_screen:
+    call screen_program
     ret
 
 clear_console:

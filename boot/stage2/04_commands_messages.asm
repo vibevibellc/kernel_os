@@ -19,13 +19,14 @@ command_table:
     dw cmd_forward, do_forward
     dw cmd_back, do_back
     dw cmd_view, do_view
+    dw cmd_screen, do_screen
     dw cmd_pm32, do_pm32
     dw cmd_halt, do_halt
     dw cmd_reboot, do_reboot
     dw 0, 0
 
 msg_banner db "stage2: command monitor ready", 13, 10, 0
-msg_hint db "hardware_list, memory_map, calc, chat, curl, hostreq, task_spawn, task_list, task_retire, task_step, ramlist, edit, grep, peek, search, next, prev, forward, back, view, pm32, halt, reboot", 13, 10, 13, 10, 0
+msg_hint db "hardware_list, memory_map, calc, chat, curl, hostreq, task_spawn, task_list, task_retire, task_step, ramlist, edit, grep, peek, search, next, prev, forward, back, view, screen, pm32, halt, reboot", 13, 10, 13, 10, 0
 msg_help db "commands:", 13, 10
          db " hardware_list  enumerate hardware visible through BIOS and low memory", 13, 10
          db " memory_map     query BIOS E820 memory map and safe usable ranges", 13, 10
@@ -47,6 +48,7 @@ msg_help db "commands:", 13, 10
          db " forward        move the current view window forward", 13, 10
          db " back           move the current view window backward", 13, 10
          db " view           redraw the current window", 13, 10
+         db " screen         monitor screen controls (auto-clear on/off/status)", 13, 10
          db " pm32           enter 32-bit protected mode, run a self-test, and return", 13, 10
          db " halt           stop the CPU", 13, 10
          db " reboot         jump back through BIOS", 13, 10, 0
@@ -144,6 +146,14 @@ msg_ramlist_cleared db "cleared", 13, 10, 0
 msg_ramlist_show db "contents:", 13, 10, 0
 msg_ramlist_none db "empty", 13, 10, 0
 msg_ramlist_item_sep db ": ", 0
+msg_screen_intro db "screen: status, on, off, clear, exit", 13, 10, 0
+msg_screen_unknown db "use status/on/off/clear/exit", 13, 10, 0
+msg_screen_status_prefix db "auto-clear: ", 0
+msg_screen_on_state db "on", 13, 10, 0
+msg_screen_off_state db "off", 13, 10, 0
+msg_screen_enabled db "auto-clear enabled", 13, 10, 0
+msg_screen_disabled db "auto-clear disabled", 13, 10, 0
+msg_screen_exit db "leaving screen controls", 13, 10, 0
 msg_cmd_prefix db "CMD: ", 0
 msg_cmd_dispatch db "AI requested command: ", 0
 msg_error_prefix db "Error:", 0
@@ -199,6 +209,7 @@ prompt_task_session db "session> ", 0
 prompt_task_goal db "goal> ", 0
 prompt_task_source db "source session> ", 0
 prompt_ramlist db 0x72, 0x61, 0x6D, 0x6C, 0x69, 0x73, 0x74, 0x3E, 0x20, 0x00
+prompt_screen db "screen> ", 0
 prompt_ramlist_value db "value> ", 0
 prompt_host_prompt db "prompt> ", 0
 prompt_host_modifier db "modifier> ", 0
@@ -227,6 +238,7 @@ cmd_prev db "prev", 0
 cmd_forward db "forward", 0
 cmd_back db "back", 0
 cmd_view db "view", 0
+cmd_screen db "screen", 0
 cmd_pm32 db "pm32", 0
 cmd_halt db "halt", 0
 cmd_reboot db "reboot", 0
@@ -235,6 +247,10 @@ cmd_ramlist_push db "push", 0
 cmd_ramlist_pop db "pop", 0
 cmd_ramlist_show db "show", 0
 cmd_ramlist_clear db "clear", 0
+cmd_screen_status db "status", 0
+cmd_screen_on db "on", 0
+cmd_screen_off db "off", 0
+cmd_screen_clear db "clear", 0
 curl_prefix db "/curl ", 0
 loop_prefix db "/loop", 0
 patch_prefix db "/patch ", 0

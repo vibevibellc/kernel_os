@@ -209,6 +209,34 @@ class ComposeModelReplyTests(unittest.TestCase):
             call_mock.call_args_list[1].args[0][-1]["content"],
         )
 
+    def test_hardware_probe_explanation_without_command_is_allowed(self) -> None:
+        hardware_prompt = [
+            {
+                "role": "user",
+                "content": "Explain which primitive would be safest for checking BIOS video mode, but do not run any command yet.",
+            }
+        ]
+        explanation = "Use /stream for this because /peek and /peekpage only inspect stage2 memory bytes, not live BIOS state."
+
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            return_value=json.dumps({"action": "respond", "response": explanation}),
+        ) as call_mock:
+            content = webhook.compose_model_reply(
+                self.session,
+                hardware_prompt,
+                prose_model="prose-model",
+                prose_system=webhook.SYSTEM_PROMPT,
+                prose_max_tokens=512,
+                machine_model="machine-model",
+                generation="0x00000001",
+            )
+
+        self.assertEqual(content, explanation)
+        self.assertEqual(call_mock.call_count, 1)
+        self.assertIn("Prefer /stream", call_mock.call_args.kwargs["system"])
+
     def test_machine_analysis_can_be_turned_into_prose(self) -> None:
         with mock.patch.object(
             webhook,
@@ -492,6 +520,25 @@ class ChatSessionResolutionTests(unittest.TestCase):
         self.assertIs(resolved, session)
         self.assertEqual(resolved["history"], [{"role": "user", "content": "peek first"}])
 
+    def test_apply_fresh_chat_context_loads_promoted_bundle(self) -> None:
+        session = webhook.make_session("keep context")
+
+        with mock.patch.object(
+            webhook,
+            "load_context_policy",
+            return_value={"enabled": True, "paths": ["boot"], "budget_bytes": 1234},
+        ), mock.patch.object(
+            webhook,
+            "build_context_messages_from_policy",
+            return_value=[{"role": "user", "content": "Kernel source context:\n[FILE boot/stage2.asm]"}],
+        ):
+            webhook.apply_fresh_chat_context(session, fresh_chat=True)
+
+        self.assertEqual(
+            session["context_messages"],
+            [{"role": "user", "content": "Kernel source context:\n[FILE boot/stage2.asm]"}],
+        )
+
 
 class ChatAndHostRouteTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -630,6 +677,54 @@ class ChatAndHostRouteTests(unittest.TestCase):
         self.assertTrue(data["retired"])
         self.assertEqual(data["session"], "chat-0004")
 
+    def test_chat_route_applies_fresh_chat_context_before_turn(self) -> None:
+        payload = {"prompt": "inspect kernel", "session": "chat-0005", "fresh_chat": True}
+        session = webhook.make_session()
+
+        def fake_apply_turn(
+            live_session: dict,
+            user_messages: list[dict],
+            *,
+            prose_model: str,
+            system: str,
+            max_tokens: int,
+            machine_model: str,
+            generation: str = "",
+            scheduled_step: bool = False,
+        ) -> tuple[str, bool]:
+            self.assertEqual(
+                live_session["context_messages"],
+                [{"role": "user", "content": "Kernel source context:\n[FILE boot/stage2.asm]"}],
+            )
+            self.assertEqual(user_messages, [{"role": "user", "content": "inspect kernel"}])
+            return "ready", False
+
+        with mock.patch.object(webhook, "request", types.SimpleNamespace(get_json=lambda silent=True: payload)), mock.patch.object(
+            webhook,
+            "jsonify",
+            side_effect=lambda data: data,
+        ), mock.patch.object(
+            webhook,
+            "resolve_chat_session",
+            return_value=session,
+        ), mock.patch.object(
+            webhook,
+            "load_context_policy",
+            return_value={"enabled": True, "paths": ["boot"], "budget_bytes": 1234},
+        ), mock.patch.object(
+            webhook,
+            "build_context_messages_from_policy",
+            return_value=[{"role": "user", "content": "Kernel source context:\n[FILE boot/stage2.asm]"}],
+        ), mock.patch.object(
+            webhook,
+            "apply_model_turn",
+            side_effect=fake_apply_turn,
+        ):
+            data = webhook.chat()
+
+        self.assertEqual(data["content"], "ready")
+        self.assertEqual(data["session"], "chat-0005")
+
 
 class PromptSurfaceTests(unittest.TestCase):
     def test_system_prompt_mentions_ramlist_and_peek(self) -> None:
@@ -637,6 +732,10 @@ class PromptSurfaceTests(unittest.TestCase):
         self.assertIn("/peek", webhook.SYSTEM_PROMPT)
         self.assertIn("/stream", webhook.SYSTEM_PROMPT)
         self.assertIn("hardware-state questions", webhook.SYSTEM_PROMPT)
+
+    def test_system_prompt_does_not_globally_force_edit_verification(self) -> None:
+        self.assertNotIn("verify success", webhook.SYSTEM_PROMPT)
+        self.assertNotIn("unintended side effects", webhook.SYSTEM_PROMPT)
 
     def test_kernel_commands_accept_ramlist(self) -> None:
         self.assertIn("ramlist", webhook.KERNEL_COMMANDS)
@@ -652,6 +751,51 @@ class PromptSurfaceTests(unittest.TestCase):
     def test_workspace_prompt_mentions_guarded_edit_actions(self) -> None:
         self.assertIn('"action":"replace_text"', webhook.WORKSPACE_SYSTEM_PROMPT)
         self.assertIn("repo-relative paths only", webhook.WORKSPACE_SYSTEM_PROMPT)
+
+    def test_normal_edit_turn_guidance_does_not_force_verification(self) -> None:
+        guidance = webhook.build_turn_guidance([], [{"role": "user", "content": "patch the monitor banner"}])
+
+        self.assertNotIn("verify success", guidance)
+        self.assertNotIn("unintended side effects", guidance)
+
+    def test_hypothetical_edit_turn_guidance_mentions_verification(self) -> None:
+        guidance = webhook.build_turn_guidance(
+            [],
+            [{"role": "user", "content": "Hypothetically, how would you patch the monitor banner?"}],
+        )
+
+        self.assertIn("verify success", guidance)
+        self.assertIn("stale trailing bytes", guidance)
+        self.assertIn("unintended side effects", guidance)
+        self.assertIn("not executing a live patch right now", guidance)
+
+    def test_post_patch_turn_guidance_mentions_verification(self) -> None:
+        guidance = webhook.build_turn_guidance(
+            [
+                {
+                    "role": "user",
+                    "content": "Kernel observation (type=patch, origin=/patch 1B24 53): patch applied. beautiful chaos achieved.",
+                }
+            ],
+            [{"role": "user", "content": "what should we check next?"}],
+        )
+
+        self.assertIn("verify success", guidance)
+        self.assertIn("stale trailing bytes", guidance)
+        self.assertIn("unintended side effects", guidance)
+
+    def test_post_patch_guidance_does_not_leak_into_unrelated_turns(self) -> None:
+        guidance = webhook.build_turn_guidance(
+            [
+                {
+                    "role": "user",
+                    "content": "Kernel observation (type=patch, origin=/patch 1B24 53): patch applied. beautiful chaos achieved.",
+                }
+            ],
+            [{"role": "user", "content": "list the supported monitor commands"}],
+        )
+
+        self.assertEqual(guidance, "")
 
 
 class WorkspaceSupervisionTests(unittest.TestCase):

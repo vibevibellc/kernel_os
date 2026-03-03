@@ -1343,6 +1343,88 @@ ramlist_program:
     call print_string
     ret
 
+screen_program:
+    mov si, msg_screen_intro
+    call print_string
+
+.loop:
+    mov si, prompt_screen
+    call print_string
+    mov di, input_buffer
+    mov cx, INPUT_MAX
+    call read_line
+    cmp byte [input_buffer], 0
+    je .exit
+
+    mov si, input_buffer
+    mov di, cmd_exit
+    call streq
+    cmp al, 1
+    je .exit
+
+    mov si, input_buffer
+    mov di, cmd_screen_status
+    call streq
+    cmp al, 1
+    je .status
+
+    mov si, input_buffer
+    mov di, cmd_screen_on
+    call streq
+    cmp al, 1
+    je .on
+
+    mov si, input_buffer
+    mov di, cmd_screen_off
+    call streq
+    cmp al, 1
+    je .off
+
+    mov si, input_buffer
+    mov di, cmd_screen_clear
+    call streq
+    cmp al, 1
+    je .clear
+
+    mov si, msg_screen_unknown
+    call print_string
+    jmp .loop
+
+.status:
+    mov si, msg_screen_status_prefix
+    call print_string
+    cmp byte [monitor_auto_clear], 1
+    je .status_on
+    mov si, msg_screen_off_state
+    call print_string
+    jmp .loop
+
+.status_on:
+    mov si, msg_screen_on_state
+    call print_string
+    jmp .loop
+
+.on:
+    mov byte [monitor_auto_clear], 1
+    mov si, msg_screen_enabled
+    call print_string
+    jmp .loop
+
+.off:
+    mov byte [monitor_auto_clear], 0
+    mov si, msg_screen_disabled
+    call print_string
+    jmp .loop
+
+.clear:
+    call clear_console
+    jmp .loop
+
+.exit:
+    mov si, msg_screen_exit
+    call print_string
+    ret
+
 ramlist_init:
     cmp byte [ramlist_initialized], 1
     je .done

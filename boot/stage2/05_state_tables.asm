@@ -50,6 +50,7 @@ hardware_port_count db 0
 hardware_drive_count db 0
 hardware_drive_id db 0
 text_console_ready db 0
+monitor_auto_clear db 0
 e820_continuation dd 0
 e820_buffer times 20 db 0
 editor_length dw 0

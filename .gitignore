@@ -20,6 +20,9 @@ vm/
 *.swo
 *~
 *.md
+!README.md
+!ETHICS.md
+!SELF_MAP_TASK_SUBSYSTEM.md
 # Python
 __pycache__/
 *.py[cod]

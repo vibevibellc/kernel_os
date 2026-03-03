@@ -18,6 +18,7 @@ from flask import Flask, jsonify, request
 
 from command_protocol import extract_kernel_command
 from git_sync import commit_and_sync
+from kernel_context import DEFAULT_POLICY_PATH, build_context_messages_from_policy, load_context_policy
 from kernel_capabilities import (
     LOCAL_MONITOR_COMMANDS,
     format_monitor_command_names,
@@ -77,6 +78,7 @@ WORKSPACE_MAX_SEARCH_RESULTS = int(os.getenv("WORKSPACE_MAX_SEARCH_RESULTS", "40
 WORKSPACE_MAX_FILE_BYTES = int(os.getenv("WORKSPACE_MAX_FILE_BYTES", "200000"))
 WORKSPACE_MAX_WRITE_BYTES = int(os.getenv("WORKSPACE_MAX_WRITE_BYTES", "120000"))
 WORKSPACE_MAX_OBSERVATION_CHARS = int(os.getenv("WORKSPACE_MAX_OBSERVATION_CHARS", "12000"))
+FRESH_CHAT_CONTEXT_POLICY_PATH = Path(os.getenv("FRESH_CHAT_CONTEXT_POLICY_PATH", str(DEFAULT_POLICY_PATH)))
 
 SYSTEM_PROMPT = f"""You are a bounded assistant attached to an experimental x86 BIOS monitor through a serial bridge.
 
@@ -725,11 +727,62 @@ def operator_requests_hardware_probe(text: str) -> bool:
     )
 
 
+def operator_requests_hypothetical_edit(text: str) -> bool:
+    normalized = " ".join((text or "").lower().split())
+    if not normalized:
+        return False
+    if not EDIT_INTENT_PATTERN.search(normalized):
+        return False
+
+    hypothetical_hints = (
+        "hypothetical",
+        "hypothetically",
+        "how would",
+        "what would",
+        "would you",
+        "could you outline",
+        "plan the patch",
+        "propose the patch",
+        "describe the patch",
+        "if you were to",
+    )
+    return any(hint in normalized for hint in hypothetical_hints)
+
+
+def operator_requests_patch_followup(text: str) -> bool:
+    normalized = " ".join((text or "").lower().split())
+    if not normalized:
+        return False
+
+    followup_hints = (
+        "verify",
+        "verified",
+        "check",
+        "confirm",
+        "did it work",
+        "what should we check next",
+        "what next",
+        "next step",
+        "side effect",
+    )
+    return any(hint in normalized for hint in followup_hints)
+
+
 def conversation_has_peek_observation(conversation: list[dict]) -> bool:
     for message in conversation:
         if message.get("role") != "user":
             continue
         if "peek 0x" in str(message.get("content", "")):
+            return True
+    return False
+
+
+def conversation_has_patch_observation(conversation: list[dict]) -> bool:
+    for message in conversation:
+        if message.get("role") != "user":
+            continue
+        content = str(message.get("content", ""))
+        if "type=patch" in content or "patch applied" in content:
             return True
     return False
 
@@ -746,6 +799,31 @@ def build_turn_guidance(conversation: list[dict], user_messages: list[dict]) -> 
                 "Do not use /patch unless the operator explicitly asks to mutate code.",
             ]
         )
+
+    if operator_requests_hypothetical_edit(latest_request):
+        return "\n".join(
+            [
+                f"Latest operator request: {compact_text(latest_request, 160)}",
+                "The latest request is about a hypothetical edit plan, not executing a live patch right now.",
+                "Answer in concise prose unless the operator explicitly asks you to mutate bytes.",
+                "Expand the plan with a verification step: explain how you would verify success, how you would detect stale trailing bytes if strings or data are touched, and how you would look for unintended side effects.",
+            ]
+        )
+
+    if conversation_has_patch_observation(conversation) and (
+        not latest_request
+        or operator_requests_code_edit(latest_request)
+        or operator_requests_patch_followup(latest_request)
+    ):
+        guidance = [
+            f"Latest operator request: {compact_text(latest_request, 160)}" if latest_request else "Latest context: a live patch result is already in session history.",
+            "A live patch result already exists in the session history.",
+            "Do not stop at 'patch applied' if another concrete verification step is still needed.",
+            "If you answer in prose, include how you would verify success, how you would detect stale trailing bytes for string or data edits, and how you would check for unintended side effects.",
+        ]
+        if operator_requests_code_edit(latest_request):
+            guidance.append("Prefer one concrete verification step now over a broad explanation.")
+        return "\n".join(guidance)
 
     if not operator_requests_code_edit(latest_request):
         return ""
@@ -1048,7 +1126,7 @@ def compose_model_reply(
     machine_model: str,
     generation: str = "",
 ) -> str:
-    conversation = list(session["history"]) + user_messages
+    conversation = list(session.get("context_messages", [])) + list(session["history"]) + user_messages
     turn_guidance = build_turn_guidance(conversation, user_messages)
     assert conversation, "expected at least one message in the model conversation"
     assert prose_model, "expected a prose model"
@@ -1147,6 +1225,7 @@ def make_session(goal: str = "") -> dict:
     now = time.time()
     return {
         "active": True,
+        "context_messages": [],
         "history": [],
         "goal": compact_text(goal, 240),
         "mode": SESSION_MODE_KERNEL,
@@ -1295,6 +1374,17 @@ def build_system_prompt(session: dict, override: str | None = None, generation: 
     if extras:
         return base + "\n\n" + "\n".join(extras)
     return base
+
+
+def apply_fresh_chat_context(session: dict, *, fresh_chat: bool) -> None:
+    if not fresh_chat:
+        return
+    policy = load_context_policy(FRESH_CHAT_CONTEXT_POLICY_PATH)
+    if policy is None:
+        session["context_messages"] = []
+        return
+    session["context_messages"] = build_context_messages_from_policy(policy)
+    persist_sessions()
 
 
 def enforce_step_interval(session: dict) -> None:
@@ -1466,6 +1556,7 @@ def format_session_list() -> str:
 def serialize_session(session: dict) -> dict:
     return {
         "active": bool(session.get("active", True)),
+        "context_messages": list(session.get("context_messages", [])),
         "history": list(session.get("history", [])),
         "goal": session.get("goal", ""),
         "mode": normalize_session_mode(session.get("mode", SESSION_MODE_KERNEL)),
@@ -1501,6 +1592,7 @@ def load_sessions() -> None:
     for session_id, stored in raw_state.items():
         session = make_session(stored.get("goal", ""))
         session["active"] = bool(stored.get("active", True))
+        session["context_messages"] = list(stored.get("context_messages", []))
         session["history"] = list(stored.get("history", []))
         trim_history(session)
         session["goal"] = compact_text(stored.get("goal", ""), 240)
@@ -1530,6 +1622,7 @@ def chat() -> tuple:
 
     try:
         session = resolve_chat_session(session_id, fresh_chat=fresh_chat)
+        apply_fresh_chat_context(session, fresh_chat=fresh_chat)
         content, retired = apply_model_turn(
             session,
             user_messages,
@@ -1544,6 +1637,8 @@ def chat() -> tuple:
     except RuntimeError as exc:
         status = 429 if "limit" in str(exc) else 409 if "retired" in str(exc) else 500
         return jsonify({"error": str(exc), "session": session_id}), status
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "session": session_id}), 500
     except requests.RequestException as exc:
         return jsonify({"error": str(exc), "session": session_id}), 502
 

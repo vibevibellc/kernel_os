@@ -22,6 +22,7 @@ SOCKET_PATH = VM_DIR / "relay-smoke.sock"
 TRANSCRIPT_PATH = VM_DIR / "relay-smoke-transcript.log"
 DISK_COPY_PATH = VM_DIR / "relay-smoke-disk.img"
 NL = r"\r+\n"
+RELAY_LINE_LIMIT = 255
 
 
 class SmokeFailure(RuntimeError):
@@ -180,6 +181,8 @@ class SupervisorRelaySmoke:
             raise SmokeFailure("webhook was not started")
         master_fd, slave_fd = pty.openpty()
         self.master_fd = master_fd
+        env = os.environ.copy()
+        env["KERNEL_LINE_LIMIT"] = str(RELAY_LINE_LIMIT)
         self.supervisor = subprocess.Popen(
             [
                 sys.executable,
@@ -192,6 +195,7 @@ class SupervisorRelaySmoke:
                 "relay-smoke",
             ],
             cwd=ROOT,
+            env=env,
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -342,7 +346,7 @@ class SupervisorRelaySmoke:
         for index in range(1, relay_turns + 1):
             payload = self.expect_post("/chat", timeout=8)
             payload_prompt = str(payload.get("prompt", ""))
-            if len(payload_prompt) > 255:
+            if len(payload_prompt) > RELAY_LINE_LIMIT:
                 raise SmokeFailure(f"relay prompt exceeded kernel limit: {len(payload_prompt)}")
             if index == 1 and payload.get("fresh_chat") is not True:
                 raise SmokeFailure(f"first relay turn should be fresh_chat=true: {payload}")
@@ -370,7 +374,8 @@ class SupervisorRelaySmoke:
         if payload.get("action") != "retire-session":
             raise SmokeFailure(f"expected retire-session on chat exit, got {payload}")
 
-        self.expect(rf"leaving chat{NL}kernel_os> ", timeout=5)
+        self.expect(rf"leaving chat{NL}", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
 
         if self.webhook is None or len(self.webhook.chat_requests) != relay_turns:
             raise SmokeFailure("fake webhook did not record the expected relay chat requests")
