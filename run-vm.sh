@@ -10,7 +10,10 @@ SERIAL_SOCKET="${SERIAL_SOCKET:-${ROOT_DIR}/vm/com1.sock}"
 SERIAL_WAIT="${SERIAL_WAIT:-off}"
 KEYBOARD_LAYOUT="${KEYBOARD_LAYOUT:-en-us}"
 VIDEO_ADAPTER="${VIDEO_ADAPTER:-std}"
-DISPLAY_BACKEND="${DISPLAY_BACKEND:-cocoa,zoom-to-fit=on}"
+DISPLAY_BACKEND="${DISPLAY_BACKEND:-auto}"
+DISPLAY_ZOOM_TO_FIT="${DISPLAY_ZOOM_TO_FIT:-on}"
+DISPLAY_SHOW_CURSOR="${DISPLAY_SHOW_CURSOR:-on}"
+DISPLAY_FULL_SCREEN="${DISPLAY_FULL_SCREEN:-off}"
 DISK_LOCKING="${DISK_LOCKING:-off}"
 
 if [[ ! -f "${DISK_PATH}" ]]; then
@@ -32,6 +35,25 @@ case "${SERIAL_MODE}" in
     ;;
 esac
 
+resolve_display_backend() {
+  case "${DISPLAY_BACKEND}" in
+    auto)
+      case "$(uname -s)" in
+        Darwin)
+          printf 'cocoa,show-cursor=%s,zoom-to-fit=%s,full-screen=%s' \
+            "${DISPLAY_SHOW_CURSOR}" "${DISPLAY_ZOOM_TO_FIT}" "${DISPLAY_FULL_SCREEN}"
+          ;;
+        *)
+          printf 'default'
+          ;;
+      esac
+      ;;
+    *)
+      printf '%s' "${DISPLAY_BACKEND}"
+      ;;
+  esac
+}
+
 DISPLAY_ARGS=()
 HAS_DISPLAY_OVERRIDE=0
 for arg in "$@"; do
@@ -41,8 +63,11 @@ for arg in "$@"; do
   fi
 done
 
-if [[ "${HAS_DISPLAY_OVERRIDE}" -eq 0 ]] && [[ -n "${DISPLAY_BACKEND}" ]]; then
-  DISPLAY_ARGS=(-display "${DISPLAY_BACKEND}")
+if [[ "${HAS_DISPLAY_OVERRIDE}" -eq 0 ]]; then
+  RESOLVED_DISPLAY_BACKEND="$(resolve_display_backend)"
+  if [[ -n "${RESOLVED_DISPLAY_BACKEND}" ]]; then
+    DISPLAY_ARGS=(-display "${RESOLVED_DISPLAY_BACKEND}")
+  fi
 fi
 
 exec "${QEMU_BIN}" \

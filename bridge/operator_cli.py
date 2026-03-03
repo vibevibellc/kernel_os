@@ -40,12 +40,14 @@ def main() -> int:
     spawn_parser.add_argument("session")
     spawn_parser.add_argument("--goal", default="")
     spawn_parser.add_argument("--style", default="")
+    spawn_parser.add_argument("--mode", choices=("kernel", "workspace"), default="kernel")
     spawn_parser.set_defaults(
         payload=lambda args: {
             "action": "spawn-session",
             "session": args.session,
             "goal": args.goal,
             "style": args.style,
+            "mode": args.mode,
         }
     )
 
@@ -55,6 +57,7 @@ def main() -> int:
     clone_parser.add_argument("--goal", default="")
     clone_parser.add_argument("--modifier", default="")
     clone_parser.add_argument("--style", default="")
+    clone_parser.add_argument("--mode", choices=("kernel", "workspace"), default="")
     clone_parser.set_defaults(
         payload=lambda args: {
             "action": "clone-session",
@@ -63,6 +66,7 @@ def main() -> int:
             "goal": args.goal,
             "modifier": args.modifier,
             "style": args.style,
+            "mode": args.mode,
         }
     )
 
@@ -84,11 +88,13 @@ def main() -> int:
     step_parser = subparsers.add_parser("step-session")
     step_parser.add_argument("session")
     step_parser.add_argument("--prompt", default="")
+    step_parser.add_argument("--mode", choices=("kernel", "workspace"), default="")
     step_parser.set_defaults(
         payload=lambda args: {
             "action": "step-session",
             "session": args.session,
             "prompt": args.prompt,
+            "mode": args.mode,
         }
     )
 

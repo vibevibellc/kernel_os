@@ -64,15 +64,29 @@ Minimal BIOS playground that boots a two-stage loader on a raw disk image, pairs
 
 ## Monitor commands highlights
 
-- `help`, `graph`, `paint`, `edit`, `clear`, `about`, `halt`, `reboot`
+- `edit`, `grep`, `peek`, `search`, `next`, `prev`, `forward`, `back`, `view`
 - Supervised task helpers: `task_spawn`, `task_list`, `task_step`, `task_retire`
 - Host interaction: `chat`, `curl`, `hostreq`, `hardware_list`, `memory_map`, `calc`
   
 The kernel prints `CMD:` lines when the bridge receives slash commands (`/task_list`, `/paint`, `/clear`, etc.).
+`grep` and `peek` now act as navigator presets over two byte sources: the scratch editor buffer in text mode and stage2 memory in hex mode. Once a preset is active, `search`, `next`, `prev`, `forward`, `back`, and `view` all operate on the same shared cursor, needle, and window state.
 Entering `chat` starts one fresh host conversation, and later prompts in that same `chat` visit keep their context until you leave `chat`.
 Inside `chat`, non-interactive command results such as `peek`, `peekpage`, `patch`, `curl`, and selected text-only monitor commands are fed back to the model automatically so it can keep working without waiting for another user prompt.
 The model can still emit `/loop` to request broader autonomous recursion across several host round-trips. The loop ends when the model returns a normal prose reply or the kernel hits its local recursion cap.
 If the model emits `/kill-self`, the bridge marks that explicitly and the kernel halts.
+
+## Supervised workspace sessions
+
+The host webhook also supports a `workspace` session mode for supervised repo editing outside the BIOS monitor path. In that mode, the model does not emit kernel slash commands. Instead, each `step-session` call lets it issue one guarded JSON workspace action at a time such as file listing, text search, file reads, targeted replacements, or creating a new file, and the host feeds the observation back into the same session before asking for the next action.
+
+Example:
+
+```sh
+.venv/bin/python bridge/operator_cli.py spawn-session trainer --mode workspace --goal "Add a new monitor program safely"
+.venv/bin/python bridge/operator_cli.py step-session trainer --prompt "Inspect the command table, add a small program, and update tests."
+```
+
+Workspace safeguards block absolute paths, repo escapes, and high-risk top-level paths such as `.git/`, `.venv/`, `build/`, and `vm/`. Edits are limited to bounded UTF-8 text files and each supervised step has a capped number of workspace actions before the host pauses the session and requires another explicit step.
 
 ## Configuration notes
 

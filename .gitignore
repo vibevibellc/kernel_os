@@ -6,8 +6,10 @@ ehthumbs.db
 Thumbs.db
 Desktop.ini
 ._*
-
+*.json
+*.sock
 # Editor/IDE
+vm/
 .vscode/
 .idea/
 *.sublime-project

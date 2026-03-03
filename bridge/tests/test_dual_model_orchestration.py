@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -299,12 +301,14 @@ class ComposeModelReplyTests(unittest.TestCase):
         )
 
     def test_director_invalid_direct_patch_command_is_bounced_back_for_repair(self) -> None:
+        too_long_patch = "/patch 2814 " + " ".join(["90"] * 513)
+        valid_patch = "/patch 2814 " + " ".join(["90"] * 16)
         with mock.patch.object(
             webhook,
             "call_anthropic",
             side_effect=[
-                '{"action":"respond","response":"/patch 2814 68 6F 73 74 72 65 71 3A 20 6C 69 73 74 2C 20 73 70 61 77 6E 2C 20 63 6C 6F 6E 65 2C 20 72 65 74 69 72 65 2C 20 73 74 65 70"}',
-                '{"action":"respond","response":"/patch 2814 68 6F 73 74 72 65 71 3A 20 6C 69 73 74 2C 20"}',
+                json.dumps({"action": "respond", "response": too_long_patch}),
+                json.dumps({"action": "respond", "response": valid_patch}),
             ],
         ) as call_mock:
             content = webhook.compose_model_reply(
@@ -317,7 +321,7 @@ class ComposeModelReplyTests(unittest.TestCase):
                 generation="0x00000001",
             )
 
-        self.assertEqual(content, "/patch 2814 68 6F 73 74 72 65 71 3A 20 6C 69 73 74 2C 20")
+        self.assertEqual(content, valid_patch)
         self.assertEqual(call_mock.call_count, 2)
         self.assertIn(
             "invalid direct command",
@@ -381,19 +385,77 @@ class ComposeModelReplyTests(unittest.TestCase):
         )
 
 
-class AnthropicBalanceFallbackTests(unittest.TestCase):
-    def test_missing_admin_key_returns_graceful_message(self) -> None:
-        with mock.patch.object(webhook, "anthropic_admin_key", return_value=""), mock.patch.object(
+class CallAnthropicRetryTests(unittest.TestCase):
+    class _FakeResponse:
+        def __init__(self, *, payload: dict | None = None, status_code: int = 200) -> None:
+            self._payload = payload or {}
+            self.status_code = status_code
+            self.headers = {}
+            self.text = json.dumps(self._payload)
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._payload
+
+    class _FakeRequestError(webhook.requests.RequestException):
+        def __init__(self, status_code: int, text: str = "", headers: dict | None = None) -> None:
+            super().__init__(f"{status_code} failure")
+            self.response = types.SimpleNamespace(
+                status_code=status_code,
+                text=text,
+                headers=headers or {},
+            )
+
+    def test_retries_transient_upstream_failure_then_succeeds(self) -> None:
+        transient_error = self._FakeRequestError(502, "bad gateway")
+        success = self._FakeResponse(payload={"content": [{"type": "text", "text": "retry worked"}]})
+
+        with mock.patch.dict(webhook.os.environ, {"ANTHROPIC_SECRET_KEY": "test-key"}, clear=False), mock.patch.object(
             webhook,
             "request_with_tls_retry",
-            side_effect=AssertionError("network call should not happen without an admin key"),
+            side_effect=[transient_error, success],
+        ) as request_mock, mock.patch.object(webhook.time, "sleep") as sleep_mock, mock.patch.object(
+            webhook,
+            "ANTHROPIC_RETRY_ATTEMPTS",
+            3,
         ):
-            content = webhook.fetch_anthropic_balance_summary()
+            content = webhook.call_anthropic(
+                [{"role": "user", "content": "inspect"}],
+                model="machine-model",
+                system="sys",
+                max_tokens=64,
+            )
 
-        self.assertEqual(
-            content,
-            "Anthropic admin key not configured; balance summary unavailable.",
-        )
+        self.assertEqual(content, "retry worked")
+        self.assertEqual(request_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(1.0)
+
+    def test_exhausted_transient_retries_raise_compact_context(self) -> None:
+        transient_error = self._FakeRequestError(502, "temporary upstream failure")
+
+        with mock.patch.dict(webhook.os.environ, {"ANTHROPIC_SECRET_KEY": "test-key"}, clear=False), mock.patch.object(
+            webhook,
+            "request_with_tls_retry",
+            side_effect=[transient_error, transient_error, transient_error],
+        ), mock.patch.object(webhook.time, "sleep") as sleep_mock, mock.patch.object(
+            webhook,
+            "ANTHROPIC_RETRY_ATTEMPTS",
+            2,
+        ):
+            with self.assertRaises(webhook.requests.RequestException) as ctx:
+                webhook.call_anthropic(
+                    [{"role": "user", "content": "inspect"}],
+                    model="machine-model",
+                    system="sys",
+                    max_tokens=64,
+                )
+
+        self.assertIn("machine-model", str(ctx.exception))
+        self.assertIn("after 3 attempt(s)", str(ctx.exception))
+        self.assertIn("status=502", str(ctx.exception))
+        self.assertEqual(sleep_mock.call_count, 2)
 
 
 class ChatSessionResolutionTests(unittest.TestCase):
@@ -456,6 +518,21 @@ class ChatAndHostRouteTests(unittest.TestCase):
         self.assertEqual(data["retired_reason"], "host-request")
         self.assertTrue(data["retired"])
 
+    def test_spawn_session_accepts_workspace_mode(self) -> None:
+        payload = {"action": "spawn-session", "session": "trainer", "goal": "edit code", "mode": "workspace"}
+
+        with mock.patch.object(webhook, "request", types.SimpleNamespace(get_json=lambda silent=True: payload)), mock.patch.object(
+            webhook,
+            "jsonify",
+            side_effect=lambda data: data,
+        ):
+            data, status = webhook.host()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["session"], "trainer")
+        self.assertEqual(data["mode"], "workspace")
+        self.assertEqual(webhook.SESSION_STATE["trainer"]["mode"], "workspace")
+
     def test_host_git_sync_returns_commit_result(self) -> None:
         payload = {"action": "git-sync", "paths": ["boot/stage2.asm"]}
 
@@ -504,6 +581,32 @@ class ChatAndHostRouteTests(unittest.TestCase):
         self.assertEqual(data["session"], webhook.GIT_SYNC_SESSION)
         sync_mock.assert_called_once_with()
 
+    def test_step_session_routes_workspace_mode_to_workspace_turn(self) -> None:
+        session = webhook.make_session("edit code")
+        session["mode"] = "workspace"
+        webhook.SESSION_STATE["trainer"] = session
+        payload = {"action": "step-session", "session": "trainer", "prompt": "add safeguards"}
+
+        with mock.patch.object(webhook, "request", types.SimpleNamespace(get_json=lambda silent=True: payload)), mock.patch.object(
+            webhook,
+            "jsonify",
+            side_effect=lambda data: data,
+        ), mock.patch.object(
+            webhook,
+            "apply_workspace_turn",
+            return_value=("edited the supervisor safely", False),
+        ) as workspace_mock, mock.patch.object(
+            webhook,
+            "apply_model_turn",
+        ) as kernel_mock:
+            data, status = webhook.host()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["mode"], "workspace")
+        self.assertEqual(data["content"], "edited the supervisor safely")
+        workspace_mock.assert_called_once()
+        kernel_mock.assert_not_called()
+
     def test_chat_route_marks_kill_self_reason(self) -> None:
         payload = {"prompt": "halt yourself", "session": "chat-0004", "fresh_chat": True}
         session = webhook.make_session()
@@ -537,6 +640,7 @@ class PromptSurfaceTests(unittest.TestCase):
 
     def test_kernel_commands_accept_ramlist(self) -> None:
         self.assertIn("ramlist", webhook.KERNEL_COMMANDS)
+        self.assertIn("pm32", webhook.KERNEL_COMMANDS)
 
     def test_without_patching_phrase_is_not_treated_as_edit_request(self) -> None:
         self.assertFalse(
@@ -544,6 +648,72 @@ class PromptSurfaceTests(unittest.TestCase):
                 "Probe current BIOS video mode without patching anything."
             )
         )
+
+    def test_workspace_prompt_mentions_guarded_edit_actions(self) -> None:
+        self.assertIn('"action":"replace_text"', webhook.WORKSPACE_SYSTEM_PROMPT)
+        self.assertIn("repo-relative paths only", webhook.WORKSPACE_SYSTEM_PROMPT)
+
+
+class WorkspaceSupervisionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.persist_patch = mock.patch.object(webhook, "persist_sessions", return_value=None)
+        self.persist_patch.start()
+        webhook.SESSION_STATE.clear()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo_root = Path(self.temp_dir.name)
+        (self.repo_root / "bridge").mkdir(parents=True, exist_ok=True)
+        (self.repo_root / "bridge" / "example.py").write_text(
+            "def old():\n    return 1\n",
+            encoding="utf-8",
+        )
+        self.repo_patch = mock.patch.object(webhook, "REPO_ROOT", self.repo_root)
+        self.repo_patch.start()
+
+    def tearDown(self) -> None:
+        self.repo_patch.stop()
+        self.temp_dir.cleanup()
+        webhook.SESSION_STATE.clear()
+        self.persist_patch.stop()
+
+    def test_apply_workspace_turn_can_search_read_edit_and_finish(self) -> None:
+        session = webhook.make_session("edit code")
+        session["mode"] = "workspace"
+
+        with mock.patch.object(
+            webhook,
+            "call_anthropic",
+            side_effect=[
+                '{"action":"search_text","path":"bridge","pattern":"def old"}',
+                '{"action":"read_file","path":"bridge/example.py","start_line":1,"line_count":20}',
+                '{"action":"replace_text","path":"bridge/example.py","old":"def old():\\n    return 1\\n","new":"def old():\\n    return 2\\n","expected_replacements":1}',
+                '{"action":"finish","response":"Updated old() so it now returns 2."}',
+            ],
+        ) as call_mock:
+            content, retired = webhook.apply_workspace_turn(
+                session,
+                [{"role": "user", "content": "Inspect the file, edit it, and summarize the change."}],
+                prose_model="prose-model",
+                system=webhook.WORKSPACE_SYSTEM_PROMPT,
+                max_tokens=512,
+                generation="0x00000001",
+            )
+
+        self.assertFalse(retired)
+        self.assertEqual(content, "Updated old() so it now returns 2.")
+        self.assertEqual(call_mock.call_count, 4)
+        self.assertEqual((self.repo_root / "bridge" / "example.py").read_text(encoding="utf-8"), "def old():\n    return 2\n")
+        history_blob = "\n".join(message["content"] for message in session["history"] if message["role"] == "user")
+        self.assertIn("Workspace search for 'def old'", history_blob)
+        self.assertIn("Workspace file bridge/example.py lines 1-2", history_blob)
+        self.assertIn("Workspace edit applied to bridge/example.py", history_blob)
+
+    def test_workspace_safeguards_block_repo_escape(self) -> None:
+        with self.assertRaises(ValueError):
+            webhook.resolve_workspace_path("../outside.txt")
+
+    def test_workspace_safeguards_block_high_risk_paths(self) -> None:
+        with self.assertRaises(ValueError):
+            webhook.resolve_workspace_path("build/generated.bin", allow_missing=True)
 
 
 if __name__ == "__main__":

@@ -5,9 +5,9 @@ import re
 from collections import deque
 
 
-PATCH_PATTERN = re.compile(r"/patch\s+(?:0x)?[0-9a-fA-F]{1,4}(?:\s+(?:0x)?[0-9a-fA-F]{1,2}){1,32}\s*$")
-STREAM_PATTERN = re.compile(r"/stream(?:\s+(?:0x)?[0-9a-fA-F]{1,2}){1,31}\s*$")
-PEEK_PATTERN = re.compile(r"/peek\s+(?:0x)?[0-9a-fA-F]{1,4}\s+(?:0x)?[0-9a-fA-F]{1,2}\s*$")
+PATCH_PATTERN = re.compile(r"/patch\s+(?:0x)?[0-9a-fA-F]{1,4}(?:\s+(?:0x)?[0-9a-fA-F]{1,2}){1,512}\s*$")
+STREAM_PATTERN = re.compile(r"/stream(?:\s+(?:0x)?[0-9a-fA-F]{1,2}){1,496}\s*$")
+PEEK_PATTERN = re.compile(r"/peek\s+(?:0x)?[0-9a-fA-F]{1,4}\s+(?:0x)?[0-9a-fA-F]{1,4}\s*$")
 PEEK_PAGE_PATTERN = re.compile(r"/peekpage\s+(?:0x)?[0-9a-fA-F]{1,4}\s+(?:0x)?[0-9a-fA-F]{1,4}\s*$")
 CURL_PATTERN = re.compile(r"/curl\s+https?://\S+\s*$")
 LOOP_PATTERN = re.compile(r"/loop\s*$")

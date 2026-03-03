@@ -17,7 +17,7 @@ MEMORY=512M QEMU_BIN=qemu-system-x86_64 ./run-vm.sh
 stage1: boot sector running
 stage1: loading stage2
 stage2: command monitor ready
-help, hardware_list, memory_map, calc, chat, curl, hostreq, task_spawn, task_list, task_retire, task_step, graph, paint, edit, peek, clear, about, halt, reboot
+hardware_list, memory_map, calc, chat, curl, hostreq, task_spawn, task_list, task_retire, task_step, edit, peek, pm32, halt, reboot
 
 generation 0x00000001
 kernel_os> qemu-system-x86_64: terminating on signal 2 from pid 6247 (<unknown process>)

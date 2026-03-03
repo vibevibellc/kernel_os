@@ -1,3 +1,236 @@
+hardware_list:
+    call set_text_mode
+    mov si, msg_hardware_header
+    call print_string
+
+    int 0x11
+    mov [hardware_equipment_word], ax
+    mov si, msg_hardware_equipment
+    call print_string
+    mov ax, [hardware_equipment_word]
+    call print_hex_word_safe
+    mov si, newline
+    call print_string
+
+    int 0x12
+    mov si, msg_hardware_base_memory
+    call print_string
+    call print_uint_ax
+    mov si, msg_hardware_kb_suffix
+    call print_string
+
+    call refresh_text_console_metrics
+    mov si, msg_hardware_video
+    call print_string
+    xor ax, ax
+    mov al, [hardware_video_mode]
+    call print_hex_byte_safe
+    mov si, msg_hardware_video_cols
+    call print_string
+    xor ax, ax
+    mov al, [hardware_video_cols]
+    call print_uint_ax
+    mov si, msg_hardware_video_rows
+    call print_string
+    xor ax, ax
+    mov al, [hardware_video_rows]
+    call print_uint_ax
+    mov si, msg_hardware_video_page
+    call print_string
+    xor ax, ax
+    mov al, [hardware_video_page]
+    call print_uint_ax
+    mov si, newline
+    call print_string
+
+    call hardware_probe_e820
+    call hardware_list_serial_ports
+    call hardware_list_parallel_ports
+    call hardware_list_drives
+    call hardware_probe_mouse
+    ret
+
+hardware_probe_e820:
+    mov si, msg_hardware_e820_prefix
+    call print_string
+
+    push ds
+    push es
+    mov di, e820_buffer
+    xor ebx, ebx
+    mov eax, 0x0000E820
+    mov edx, 0x534D4150
+    mov ecx, 20
+    int 0x15
+    pop es
+    pop ds
+    jc .unavailable
+    cmp eax, 0x534D4150
+    jne .unavailable
+    mov si, msg_hardware_available
+    call print_string
+    ret
+
+.unavailable:
+    mov si, msg_hardware_unavailable
+    call print_string
+    ret
+
+hardware_list_serial_ports:
+    mov si, msg_hardware_serial_header
+    call print_string
+    mov byte [hardware_port_count], 0
+
+    push es
+    mov ax, 0x0040
+    mov es, ax
+
+    xor bx, bx
+    mov cx, 4
+
+.port_loop:
+    mov ax, [es:bx]
+    test ax, ax
+    jz .next
+    inc byte [hardware_port_count]
+    mov si, msg_hardware_com_prefix
+    call print_string
+    mov ax, 4
+    sub ax, cx
+    inc ax
+    call print_uint_ax
+    mov si, msg_hardware_base_prefix
+    call print_string
+    mov ax, [es:bx]
+    call print_hex_word_safe
+    mov si, newline
+    call print_string
+
+.next:
+    add bx, 2
+    loop .port_loop
+
+    pop es
+    cmp byte [hardware_port_count], 0
+    jne .done
+    mov si, msg_hardware_none
+    call print_string
+
+.done:
+    ret
+
+hardware_list_parallel_ports:
+    mov si, msg_hardware_parallel_header
+    call print_string
+    mov byte [hardware_port_count], 0
+
+    push es
+    mov ax, 0x0040
+    mov es, ax
+
+    mov bx, 8
+    mov cx, 3
+
+.port_loop:
+    mov ax, [es:bx]
+    test ax, ax
+    jz .next
+    inc byte [hardware_port_count]
+    mov si, msg_hardware_lpt_prefix
+    call print_string
+    mov ax, 3
+    sub ax, cx
+    inc ax
+    call print_uint_ax
+    mov si, msg_hardware_base_prefix
+    call print_string
+    mov ax, [es:bx]
+    call print_hex_word_safe
+    mov si, newline
+    call print_string
+
+.next:
+    add bx, 2
+    loop .port_loop
+
+    pop es
+    cmp byte [hardware_port_count], 0
+    jne .done
+    mov si, msg_hardware_none
+    call print_string
+
+.done:
+    ret
+
+hardware_list_drives:
+    mov si, msg_hardware_drive_header
+    call print_string
+    mov byte [hardware_drive_count], 0
+
+    mov dl, 0x00
+    call hardware_probe_drive
+    mov dl, 0x01
+    call hardware_probe_drive
+    mov dl, 0x80
+    call hardware_probe_drive
+    mov dl, 0x81
+    call hardware_probe_drive
+
+    cmp byte [hardware_drive_count], 0
+    jne .done
+    mov si, msg_hardware_none
+    call print_string
+
+.done:
+    ret
+
+hardware_probe_drive:
+    push ax
+    push bx
+    push cx
+    push dx
+
+    mov [hardware_drive_id], dl
+    mov ah, 0x08
+    int 0x13
+    jc .done
+
+    inc byte [hardware_drive_count]
+    mov si, msg_hardware_drive_prefix
+    call print_string
+    mov al, [hardware_drive_id]
+    call print_hex_byte_safe
+    test byte [hardware_drive_id], 0x80
+    jnz .fixed
+    mov si, msg_hardware_drive_floppy
+    call print_string
+    jmp .done
+
+.fixed:
+    mov si, msg_hardware_drive_fixed
+    call print_string
+
+.done:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+hardware_probe_mouse:
+    mov si, msg_hardware_mouse_prefix
+    call print_string
+    call mouse_init
+    jc .unavailable
+    mov si, msg_hardware_available
+    call print_string
+    ret
+
+.unavailable:
+    mov si, msg_hardware_unavailable
+    call print_string
+    ret
+
 memory_map:
     mov si, msg_memory_map_header
     call print_string
@@ -43,17 +276,240 @@ memory_map:
     mov ebx, [e820_continuation]
     test ebx, ebx
     jne .next_entry
+    call build_kernel_safe_memory_ranges
+    jc .done
+    call print_kernel_safe_memory_ranges
     ret
 
 .finish:
     cmp bp, 0
-    jne .done
+    jne .have_map
 
 .unsupported:
     mov si, msg_memory_map_unavailable
     call print_string
 
 .done:
+    ret
+
+.have_map:
+    call build_kernel_safe_memory_ranges
+    jc .done
+    call print_kernel_safe_memory_ranges
+    ret
+
+build_kernel_safe_memory_ranges:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    mov byte [safe_range_count], 0
+    xor eax, eax
+    int 0x12
+    shl eax, 10
+    cmp eax, LOW_MEMORY_LIMIT
+    jbe .store_lowmem_top
+    mov eax, LOW_MEMORY_LIMIT
+
+.store_lowmem_top:
+    mov [kernel_safe_lowmem_top], eax
+    xor ebx, ebx
+
+.next_entry:
+    push ds
+    push es
+    mov di, e820_buffer
+    mov eax, 0x0000E820
+    mov edx, 0x534D4150
+    mov ecx, 20
+    int 0x15
+    pop es
+    pop ds
+    jc .bios_done
+    cmp eax, 0x534D4150
+    jne .unsupported
+
+    mov [e820_continuation], ebx
+    cmp dword [e820_buffer + 16], 1
+    jne .advance
+    cmp dword [e820_buffer + 4], 0
+    jne .advance
+    cmp dword [e820_buffer + 12], 0
+    jne .advance
+
+    mov esi, [e820_buffer]
+    mov edi, [e820_buffer + 8]
+    add edi, esi
+    jc .advance
+    call subtract_kernel_reserved_ranges
+
+.advance:
+    mov ebx, [e820_continuation]
+    test ebx, ebx
+    jne .next_entry
+
+.bios_done:
+    clc
+    jmp .exit
+
+.unsupported:
+    stc
+
+.exit:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+subtract_kernel_reserved_ranges:
+    cmp esi, edi
+    jae .done
+
+    xor eax, eax
+    mov edx, LOW_BIOS_RESERVED_END
+    call subtract_reserved_range32
+    cmp esi, edi
+    jae .done
+
+    mov eax, PM32_STACK_TOP
+    xor edx, edx
+    mov dx, stage2_image_end
+    call subtract_reserved_range32
+    cmp esi, edi
+    jae .done
+
+    mov eax, [kernel_safe_lowmem_top]
+    mov edx, LOW_MEMORY_LIMIT
+    call subtract_reserved_range32
+    cmp esi, edi
+    jae .done
+
+    call append_safe_range32
+
+.done:
+    ret
+
+subtract_reserved_range32:
+    cmp esi, edi
+    jae .done
+    cmp edi, eax
+    jbe .done
+    cmp esi, edx
+    jae .done
+    cmp eax, esi
+    jbe .clip_front
+    cmp edx, edi
+    jae .clip_back
+
+    push eax
+    push edx
+    push edi
+    mov edi, eax
+    call append_safe_range32
+    pop edi
+    pop edx
+    pop eax
+    mov esi, edx
+    ret
+
+.clip_front:
+    cmp edx, edi
+    jae .clear
+    mov esi, edx
+    ret
+
+.clip_back:
+    mov edi, eax
+    ret
+
+.clear:
+    mov esi, edi
+
+.done:
+    ret
+
+append_safe_range32:
+    push bx
+    push dx
+
+    cmp esi, edi
+    jae .done
+    mov bl, [safe_range_count]
+    cmp bl, SAFE_RANGE_MAX
+    jae .done
+
+    xor bh, bh
+    shl bx, 2
+    mov [safe_range_bases + bx], esi
+    mov edx, edi
+    sub edx, esi
+    mov [safe_range_lengths + bx], edx
+    inc byte [safe_range_count]
+
+.done:
+    pop dx
+    pop bx
+    ret
+
+print_kernel_safe_memory_ranges:
+    push bx
+    push bp
+    push di
+    push si
+    push eax
+
+    mov si, msg_memory_safe_header
+    call print_string
+    cmp byte [safe_range_count], 0
+    jne .loop_setup
+    mov si, msg_memory_safe_none
+    call print_string
+    jmp .done
+
+.loop_setup:
+    xor bx, bx
+    xor bp, bp
+
+.loop:
+    cmp bl, [safe_range_count]
+    jae .done
+
+    inc bp
+    mov al, '#'
+    call print_char
+    mov ax, bp
+    call print_uint_ax
+    mov si, msg_base
+    call print_string
+    xor eax, eax
+    call print_hex32_eax
+    mov di, bx
+    shl di, 2
+    mov eax, [safe_range_bases + di]
+    call print_hex32_eax
+    mov si, msg_length
+    call print_string
+    xor eax, eax
+    call print_hex32_eax
+    mov eax, [safe_range_lengths + di]
+    call print_hex32_eax
+    mov si, newline
+    call print_string
+    inc bx
+    jmp .loop
+
+.done:
+    pop eax
+    pop si
+    pop di
+    pop bp
+    pop bx
     ret
 
 calculator_program:
@@ -67,10 +523,11 @@ calculator_program:
     mov di, input_buffer
     mov cx, INPUT_MAX
     call read_line
-    cmp byte [input_buffer], 0
+    mov si, input_buffer
+    call skip_spaces
+    cmp byte [si], 0
     je .exit
 
-    mov si, input_buffer
     mov di, cmd_exit
     call streq
     cmp al, 1
@@ -78,7 +535,7 @@ calculator_program:
 
     mov si, input_buffer
     call parse_signed_int
-    jc .syntax
+    jc .parse_error
     mov [calc_left], ax
 
     call skip_spaces
@@ -99,7 +556,7 @@ calculator_program:
     mov [calc_op], al
     inc si
     call parse_signed_int
-    jc .syntax
+    jc .parse_error
     mov [calc_right], ax
     call skip_spaces
     cmp byte [si], 0
@@ -122,19 +579,27 @@ calculator_program:
 
 .add:
     add ax, bx
+    jo .overflow
     jmp .result
 
 .sub:
     sub ax, bx
+    jo .overflow
     jmp .result
 
 .mul:
     imul bx
+    jo .overflow
     jmp .result
 
 .div:
     cmp bx, 0
     je .div_zero
+    cmp ax, 0x8000
+    jne .div_ready
+    cmp bx, -1
+    je .overflow
+.div_ready:
     cwd
     idiv bx
     jmp .result
@@ -142,6 +607,13 @@ calculator_program:
 .mod:
     cmp bx, 0
     je .div_zero
+    cmp ax, 0x8000
+    jne .mod_ready
+    cmp bx, -1
+    jne .mod_ready
+    xor ax, ax
+    jmp .result
+.mod_ready:
     cwd
     idiv bx
     mov ax, dx
@@ -162,8 +634,17 @@ calculator_program:
     call print_string
     jmp .loop
 
+.parse_error:
+    cmp ax, 1
+    je .overflow
+
 .syntax:
     mov si, msg_calc_syntax
+    call print_string
+    jmp .loop
+
+.overflow:
+    mov si, msg_calc_overflow
     call print_string
     jmp .loop
 
@@ -349,14 +830,6 @@ curl_program:
 .exit:
     mov si, msg_curl_exit
     call print_string
-    ret
-
-show_balance_program:
-    call set_text_mode
-    mov si, msg_show_balance_wait
-    call print_string
-    call host_send_balance_request
-    call host_read_response
     ret
 
 hostreq_program:
@@ -1220,7 +1693,7 @@ parse_stream:
     call parse_hex_byte
     jc .fail
     mov bx, [patch_byte_count]
-    cmp bx, PATCH_MAX_BYTES - 1
+    cmp bx, STREAM_MAX_BYTES
     jae .fail
     mov [patch_bytes + bx], al
     inc bx
@@ -1295,32 +1768,15 @@ peek_dump:
     push bx
     push cx
     push si
-    mov si, msg_peek_header
-    call print_string
+    call navigator_configure_memory_hex
     mov ax, [peek_offset]
-    call print_hex_word_safe
-    mov si, msg_peek_mid
-    call print_string
-    mov bx, [peek_offset]
-    add bx, 0x8000
-    mov cx, [peek_count]
-
-.byte_loop:
-    test cx, cx
-    jz .done
-    mov al, [bx]
-    call print_hex_byte_safe
-    dec cx
-    inc bx
-    test cx, cx
-    jz .done
-    mov al, ' '
-    call print_char
-    jmp .byte_loop
+    mov [navigator_cursor], ax
+    mov ax, [peek_count]
+    mov [navigator_window], ax
+    mov si, msg_peek_header
+    call navigator_render_hex_with_prefix
 
 .done:
-    mov si, newline
-    call print_string
     pop si
     pop cx
     pop bx
@@ -1663,12 +2119,6 @@ chat_enable_continuation:
 
 chat_command_should_auto_continue:
     mov si, input_buffer
-    mov di, cmd_help
-    call streq
-    cmp al, 1
-    je .yes
-
-    mov si, input_buffer
     mov di, cmd_hardware_list
     call streq
     cmp al, 1
@@ -1681,25 +2131,19 @@ chat_command_should_auto_continue:
     je .yes
 
     mov si, input_buffer
-    mov di, cmd_show_balance
-    call streq
-    cmp al, 1
-    je .yes
-
-    mov si, input_buffer
     mov di, cmd_task_list
     call streq
     cmp al, 1
     je .yes
 
     mov si, input_buffer
-    mov di, cmd_about
+    mov di, cmd_grep
     call streq
     cmp al, 1
     je .yes
 
     mov si, input_buffer
-    mov di, cmd_clear
+    mov di, cmd_pm32
     call streq
     cmp al, 1
     je .yes
@@ -1712,154 +2156,171 @@ chat_command_should_auto_continue:
     ret
 
 host_send_list_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_list
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_spawn_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_spawn_prefix
-    call serial_write_string
+    call buffer_write_string
     mov si, task_session_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_host_post_spawn_mid
-    call serial_write_string
+    call buffer_write_string
     mov si, task_goal_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_json_quote
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_retire_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_retire_prefix
-    call serial_write_string
+    call buffer_write_string
     mov si, task_session_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_json_quote
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_retire_named:
-    mov di, si
+    push si
+    mov di, host_request_buffer
     mov si, msg_host_post_retire_prefix
-    call serial_write_string
-    mov si, di
-    call serial_write_json_escaped
+    call buffer_write_string
+    pop si
+    call buffer_write_json_escaped
     mov si, msg_json_quote
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_step_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_step_prefix
-    call serial_write_string
+    call buffer_write_string
     mov si, task_session_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_host_post_step_mid
-    call serial_write_string
+    call buffer_write_string
     mov si, task_arg_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_json_quote
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_curl_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_curl_prefix
-    call serial_write_string
+    call buffer_write_string
     mov si, task_arg_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_json_quote
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
-    ret
-
-host_send_balance_request:
-    mov si, msg_host_post_balance
-    call serial_write_string
-    call serial_write_generation_field
-    mov si, msg_json_close
-    call serial_write_string
-    mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_git_sync_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_git_sync
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_clone_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_clone_prefix
-    call serial_write_string
+    call buffer_write_string
     mov si, task_session_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_host_post_clone_mid
-    call serial_write_string
+    call buffer_write_string
     mov si, task_source_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_host_post_modifier_mid
-    call serial_write_string
+    call buffer_write_string
     mov si, task_arg_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_json_quote
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret
 
 host_send_adopt_request:
+    mov di, host_request_buffer
     mov si, msg_host_post_adopt_prefix
-    call serial_write_string
+    call buffer_write_string
     mov si, task_session_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_host_post_clone_mid
-    call serial_write_string
+    call buffer_write_string
     mov si, task_source_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_host_post_modifier_mid
-    call serial_write_string
+    call buffer_write_string
     mov si, task_arg_buffer
-    call serial_write_json_escaped
+    call buffer_write_json_escaped
     mov si, msg_json_quote
-    call serial_write_string
-    call serial_write_generation_field
+    call buffer_write_string
+    call buffer_write_generation_field
     mov si, msg_json_close
-    call serial_write_string
+    call buffer_write_string
     mov si, newline
-    call serial_write_string
+    call buffer_write_string
+    mov byte [di], 0
+    call serial_write_buffer
     ret

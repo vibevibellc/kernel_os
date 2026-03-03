@@ -22,6 +22,7 @@ load_project_env()
 REQUEST_PREFIX = "POST "
 PROMPT_PATTERN = re.compile(r"^(?:kernel_os|chat|calc|url|session|goal|prompt|host action|source session|modifier|offset hex|count hex).*>\s*$")
 GIT_SYNC_DEBOUNCE_SECONDS = float(os.getenv("GIT_SYNC_DEBOUNCE_SECONDS", "10.0"))
+KERNEL_COMMAND_LIMIT = int(os.getenv("KERNEL_COMMAND_LIMIT", "4095"))
 
 
 def sanitize_line(text: str, limit: int = 480) -> str:
@@ -43,18 +44,36 @@ def write_line(sock: socket.socket, text: str) -> None:
     sock.sendall((text + "\r").encode("utf-8", errors="replace"))
 
 
+def decode_json_response(response) -> dict | None:
+    try:
+        data = response.json()
+    except (ValueError, AttributeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def forward_request(webhook: str, route: str, payload: dict) -> dict:
     url = urljoin(webhook.rstrip("/") + "/", route.lstrip("/"))
     response = requests.post(url, json=payload, timeout=90)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response.raise_for_status()
+    except requests.RequestException:
+        error_payload = decode_json_response(response)
+        if error_payload is not None:
+            error_payload.setdefault("http_status", getattr(response, "status_code", 0))
+            return error_payload
+        raise
+    data = decode_json_response(response)
+    if data is None:
+        raise ValueError("webhook returned a non-JSON response")
+    return data
 
 
 def format_bridge_reply(route: str, data: dict) -> str:
     if data.get("retired_reason") == "kill-self":
         return "SYS: session retired by /kill-self"
     if route == "/chat" and data.get("kernel_command"):
-        return f"CMD: {sanitize_line(data['kernel_command'], 220)}"
+        return f"CMD: {sanitize_line(data['kernel_command'], KERNEL_COMMAND_LIMIT)}"
     content = data.get("content") or data.get("message") or data.get("error") or ""
     return f"AI: {sanitize_line(content)}"
 

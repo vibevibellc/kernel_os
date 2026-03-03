@@ -25,7 +25,8 @@ load_project_env()
 REQUEST_PREFIX = "POST "
 PROMPT_PATTERN = re.compile(r"^(?:kernel_os|chat|calc|url|session|goal|prompt|host action|source session|modifier|offset hex|count hex).*>\s*$")
 GIT_SYNC_DEBOUNCE_SECONDS = float(os.getenv("GIT_SYNC_DEBOUNCE_SECONDS", "10.0"))
-KERNEL_LINE_LIMIT = int(os.getenv("KERNEL_LINE_LIMIT", "255"))
+KERNEL_LINE_LIMIT = int(os.getenv("KERNEL_LINE_LIMIT", "4095"))
+KERNEL_COMMAND_LIMIT = int(os.getenv("KERNEL_COMMAND_LIMIT", str(KERNEL_LINE_LIMIT)))
 
 
 def sanitize_line(text: str, limit: int = 480) -> str:
@@ -47,6 +48,14 @@ def write_line(sock: socket.socket, text: str) -> None:
     sock.sendall((text + "\r").encode("utf-8", errors="replace"))
 
 
+def decode_json_bytes(raw: bytes) -> dict | None:
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def forward_request(webhook: str, route: str, payload: dict) -> dict:
     url = urljoin(webhook.rstrip("/") + "/", route.lstrip("/"))
     request = Request(
@@ -55,15 +64,25 @@ def forward_request(webhook: str, route: str, payload: dict) -> dict:
         headers={"content-type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=90) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=90) as response:
+            data = decode_json_bytes(response.read())
+            if data is None:
+                raise ValueError("webhook returned a non-JSON response")
+            return data
+    except HTTPError as exc:
+        error_payload = decode_json_bytes(exc.read())
+        if error_payload is not None:
+            error_payload.setdefault("http_status", exc.code)
+            return error_payload
+        raise
 
 
 def format_bridge_reply(route: str, data: dict) -> str:
     if data.get("retired_reason") == "kill-self":
         return "SYS: session retired by /kill-self"
     if route == "/chat" and data.get("kernel_command"):
-        return f"CMD: {sanitize_line(data['kernel_command'], 220)}"
+        return f"CMD: {sanitize_line(data['kernel_command'], KERNEL_COMMAND_LIMIT)}"
     content = data.get("content") or data.get("message") or data.get("error") or ""
     return f"AI: {sanitize_line(content)}"
 

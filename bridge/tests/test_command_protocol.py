@@ -41,8 +41,10 @@ if "requests" not in sys.modules:
 
 from command_protocol import extract_kernel_command, match_pending_observation
 from kernel_capabilities import LOCAL_MONITOR_COMMANDS
+import serial_to_anthropic
 from serial_to_anthropic import attach_recent_output as serial_attach_recent_output
 from serial_to_anthropic import format_bridge_reply as serial_format_bridge_reply
+from serial_to_anthropic import forward_request as serial_forward_request
 from supervise_kernel import build_chat_relay_lines
 from supervise_kernel import detect_prompt_fragment
 from supervise_kernel import format_bridge_reply as supervise_format_bridge_reply
@@ -224,6 +226,25 @@ class BridgeReplyFormattingTests(unittest.TestCase):
                     formatter("/chat", {"kernel_command": "/peek 0 10", "retired_reason": ""}),
                     "CMD: /peek 0 10",
                 )
+
+
+class SerialForwardRequestTests(unittest.TestCase):
+    class _ErrorResponse:
+        status_code = 502
+
+        def raise_for_status(self) -> None:
+            raise serial_to_anthropic.requests.RequestException("bad gateway")
+
+        def json(self) -> dict:
+            return {"error": "Anthropic request failed after retries", "session": "chat-00000003"}
+
+    def test_returns_json_error_payload_for_http_failure(self) -> None:
+        with unittest.mock.patch.object(serial_to_anthropic.requests, "post", return_value=self._ErrorResponse(), create=True):
+            data = serial_forward_request("http://127.0.0.1:5005", "/chat", {"prompt": "test"})
+
+        self.assertEqual(data["error"], "Anthropic request failed after retries")
+        self.assertEqual(data["session"], "chat-00000003")
+        self.assertEqual(data["http_status"], 502)
 
 
 class AttachRecentOutputTests(unittest.TestCase):

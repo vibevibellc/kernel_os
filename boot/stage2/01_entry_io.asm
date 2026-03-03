@@ -1,21 +1,34 @@
 %define COM1_PORT        0x3f8
-%define INPUT_MAX        255
+%define INPUT_MAX        4095
 %define SERIAL_LINE_MAX  511
-%define GRAPH_ROWS       23
-%define GRAPH_COLS       79
-%define GRAPH_CENTER_ROW 11
-%define GRAPH_CENTER_COL 39
-%define GFX_SEG          0xa000
 %define PS2_DATA         0x60
 %define PS2_STATUS       0x64
-%define EDITOR_CAPACITY  16384
+%define EDITOR_CAPACITY  10240
 %define TASK_SLOT_COUNT  4
 %define TASK_NAME_SIZE   16
 %define TASK_GOAL_SIZE   160
 %define CHAT_SESSION_SIZE 16
 %define HOST_ACTION_SIZE 24
-%define PATCH_MAX_BYTES  32
-%define PEEK_MAX_BYTES   0x00C8
+%define PATCH_MAX_BYTES  0x0200
+%define PEEK_MAX_BYTES   0x0C80
+%define STREAM_MAX_BYTES 0x01F0
+%define NAV_NEEDLE_MAX   128
+%define NAV_TEXT_WINDOW  0x0040
+%define NAV_HEX_WINDOW   0x0010
+%define NAV_SOURCE_NONE  0
+%define NAV_SOURCE_EDITOR 1
+%define NAV_SOURCE_MEMORY 2
+%define NAV_RENDER_NONE  0
+%define NAV_RENDER_TEXT  1
+%define NAV_RENDER_HEX   2
+%define PM32_CODE_SEL    0x08
+%define PM32_DATA_SEL    0x10
+%define PM16_CODE_SEL    0x18
+%define PM16_DATA_SEL    0x20
+%define PM32_STACK_TOP   0x7000
+%define LOW_BIOS_RESERVED_END 0x00001000
+%define LOW_MEMORY_LIMIT 0x00100000
+%define SAFE_RANGE_MAX   8
 %define CHAT_LOOP_MAX_STEPS 8
 %define RAMLIST_NODE_COUNT 16
 
@@ -45,6 +58,8 @@ main_loop:
     cmp byte [input_buffer], 0
     je main_loop
     call dispatch_command
+    call clear_console
+    call do_help
     jmp main_loop
 
 dispatch_command:
@@ -82,8 +97,7 @@ do_help:
     ret
 
 do_hardware_list:
-    mov si, msg_hardware_list
-    call print_string
+    call hardware_list
     ret
 
 do_memory_map:
@@ -100,10 +114,6 @@ do_chat:
 
 do_curl:
     call curl_program
-    ret
-
-do_show_balance:
-    call show_balance_program
     ret
 
 do_hostreq:
@@ -130,31 +140,48 @@ do_ramlist:
     call ramlist_program
     ret
 
-do_graph:
-    call graph_program
-    ret
-
-do_paint:
-    call paint_program
-    ret
-
 do_edit:
     call editor_program
+    ret
+
+do_grep:
+    call grep_program
     ret
 
 do_peek:
     call peek_program
     ret
 
-do_clear:
-    call set_text_mode
-    mov si, msg_cleared
-    call print_string
+do_search:
+    call search_program
     ret
 
-do_about:
-    mov si, msg_about
-    call print_string
+do_next:
+    call next_program
+    ret
+
+do_prev:
+    call prev_program
+    ret
+
+do_forward:
+    call forward_program
+    ret
+
+do_back:
+    call back_program
+    ret
+
+do_view:
+    call view_program
+    ret
+
+do_pm32:
+    call protected_mode_program
+    ret
+
+clear_console:
+    call set_text_mode
     ret
 
 do_halt:
@@ -318,8 +345,25 @@ set_text_mode:
     push bp
     push ds
     push es
+    mov ah, 0x0f
+    int 0x10
+    cmp al, 0x03
+    jne .reset
+    cmp byte [text_console_ready], 1
+    jne .reset
+    jmp .refresh
+
+.reset:
     mov ax, 0x0003
     int 0x10
+    mov ax, 0x1112
+    xor bx, bx
+    int 0x10
+    mov byte [text_console_ready], 1
+
+.refresh:
+    call refresh_text_console_metrics
+    call clear_text_screen
     pop es
     pop ds
     pop bp
@@ -349,6 +393,74 @@ set_graphics_mode:
     pop dx
     pop cx
     pop bx
+    ret
+
+refresh_text_console_metrics:
+    push ax
+    push bx
+    push es
+
+    mov ah, 0x0f
+    int 0x10
+    mov [hardware_video_mode], al
+    mov [hardware_video_cols], ah
+    mov [hardware_video_page], bh
+
+    mov ax, 0x0040
+    mov es, ax
+    mov al, [es:0x84]
+    test al, al
+    jnz .have_rows_minus_one
+    mov al, 24
+
+.have_rows_minus_one:
+    inc al
+    mov [hardware_video_rows], al
+    cmp byte [hardware_video_cols], 0
+    jne .done
+    mov byte [hardware_video_cols], 80
+
+.done:
+    pop es
+    pop bx
+    pop ax
+    ret
+
+clear_text_screen:
+    push ax
+    push bx
+    push cx
+    push dx
+
+    xor cx, cx
+    xor ax, ax
+    mov ah, 0x06
+    mov bh, 0x07
+    mov dl, [hardware_video_cols]
+    test dl, dl
+    jnz .have_cols
+    mov dl, 80
+
+.have_cols:
+    dec dl
+    mov dh, [hardware_video_rows]
+    test dh, dh
+    jnz .have_rows
+    mov dh, 25
+
+.have_rows:
+    dec dh
+    int 0x10
+
+    mov ah, 0x02
+    mov bh, [hardware_video_page]
+    xor dx, dx
+    int 0x10
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
     ret
 
 print_string:
@@ -396,7 +508,7 @@ serial_init:
     out dx, al
 
     mov dx, COM1_PORT + 0
-    mov al, 0x03
+    mov al, 0x01
     out dx, al
 
     mov dx, COM1_PORT + 1
@@ -468,6 +580,45 @@ serial_write_json_escaped:
 .done:
     ret
 
+buffer_write_string:
+    lodsb
+    test al, al
+    jz .done
+    mov [di], al
+    inc di
+    jmp buffer_write_string
+.done:
+    ret
+
+buffer_write_json_escaped:
+    lodsb
+    test al, al
+    jz .done
+    cmp al, '"'
+    je .escape
+    cmp al, '\'
+    je .escape
+    cmp al, 32
+    jb .space
+    mov [di], al
+    inc di
+    jmp buffer_write_json_escaped
+
+.escape:
+    mov byte [di], '\'
+    inc di
+    mov [di], al
+    inc di
+    jmp buffer_write_json_escaped
+
+.space:
+    mov byte [di], ' '
+    inc di
+    jmp buffer_write_json_escaped
+
+.done:
+    ret
+
 write_hex32_buffer_eax:
     push ax
     push bx
@@ -490,6 +641,26 @@ write_hex32_buffer_eax:
     pop cx
     pop bx
     pop ax
+    ret
+
+buffer_write_generation_field:
+    push si
+    push eax
+    mov si, msg_generation_json_prefix
+    call buffer_write_string
+    mov eax, [generation]
+    call write_hex32_buffer_eax
+    mov si, msg_generation_json_suffix
+    call buffer_write_string
+    pop eax
+    pop si
+    ret
+
+serial_write_buffer:
+    push si
+    mov si, host_request_buffer
+    call serial_write_string
+    pop si
     ret
 
 read_serial_char:
@@ -564,7 +735,10 @@ streq:
 skip_spaces:
 .loop:
     cmp byte [si], ' '
+    je .consume
+    cmp byte [si], 0x09
     jne .done
+.consume:
     inc si
     jmp .loop
 .done:
@@ -598,7 +772,22 @@ parse_signed_int:
     jb .finish
     cmp dl, '9'
     ja .finish
+    sub dl, '0'
 
+    cmp bx, 3276
+    ja .overflow
+    jb .accumulate
+    test dh, dh
+    jnz .negative_limit
+    cmp dl, 7
+    ja .overflow
+    jmp .accumulate
+
+.negative_limit:
+    cmp dl, 8
+    ja .overflow
+
+.accumulate:
     mov ax, bx
     shl bx, 1
     shl ax, 1
@@ -606,9 +795,8 @@ parse_signed_int:
     shl ax, 1
     add bx, ax
 
-    mov al, [si]
-    sub al, '0'
-    cbw
+    xor ax, ax
+    mov al, dl
     add bx, ax
 
     inc si
@@ -627,6 +815,12 @@ parse_signed_int:
     jmp .done
 
 .fail:
+    xor ax, ax
+    stc
+    jmp .done
+
+.overflow:
+    mov ax, 1
     stc
 
 .done:
@@ -676,6 +870,13 @@ print_uint_ax:
 print_int_ax:
     test ax, ax
     jns .unsigned
+    cmp ax, 0x8000
+    jne .negate
+    mov si, msg_int_min
+    call print_string
+    ret
+
+.negate:
     push ax
     mov al, '-'
     call print_char

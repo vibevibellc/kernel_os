@@ -43,9 +43,15 @@ class VMChatSmoke:
             if generation_match:
                 self.generation = generation_match.group(1)
 
+            self.scenario_calc()
+            self.scenario_pm32()
+            self.scenario_memory_map()
             self.scenario_chat_context_persistence()
             self.scenario_peekpage()
             self.scenario_edit()
+            self.scenario_grep()
+            self.scenario_peek_navigator()
+            self.scenario_pm32_chat_tool()
             self.scenario_loop()
             self.scenario_patch()
             self.scenario_stream()
@@ -225,7 +231,8 @@ class VMChatSmoke:
         if payload.get("action") != "retire-session":
             raise SmokeFailure(f"expected retire-session on chat exit, got {payload}")
         self.send_host_line("AI: retired")
-        self.expect(r"leaving chat\r\nkernel_os> ", timeout=5)
+        self.expect(r"leaving chat\r\n", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
 
     def start_chat_turn(
         self,
@@ -253,6 +260,65 @@ class VMChatSmoke:
         if expected_session is not None and payload.get("session") != expected_session:
             raise SmokeFailure(f"expected session {expected_session!r}, got {payload}")
         return payload
+
+    def scenario_calc(self) -> None:
+        self.log("scenario calc")
+        self.send_operator_line("calc")
+        self.expect(r"calculator: enter expressions like 12\+34 or 42 / 6\. blank line or exit returns\.\r\n", timeout=5)
+        self.expect(r"calc> ", timeout=5)
+
+        self.send_operator_line("2+3")
+        self.expect(r"= 5\r\ncalc> ", timeout=5)
+
+        self.send_operator_line("-32768/1")
+        self.expect(r"= -32768\r\ncalc> ", timeout=5)
+
+        self.send_operator_line("32767+1")
+        self.expect(r"overflow: signed 16-bit range is -32768\.\.32767\r\ncalc> ", timeout=5)
+
+        self.send_operator_line("-32768/-1")
+        self.expect(r"overflow: signed 16-bit range is -32768\.\.32767\r\ncalc> ", timeout=5)
+
+        self.send_operator_line("-32768%-1")
+        self.expect(r"= 0\r\ncalc> ", timeout=5)
+
+        self.send_operator_line("")
+        self.expect(r"leaving calculator\r\n", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
+
+    def scenario_pm32(self) -> None:
+        self.log("scenario pm32")
+        self.send_operator_line("pm32")
+        self.expect(r"pm32: entering 32-bit protected mode\r\n", timeout=5)
+        self.expect(r"pm32: protected mode active\r\n", timeout=5)
+        match = self.expect(
+            r"pm32: returned to real mode sig=0x([0-9A-F]{8}) cr0=0x([0-9A-F]{8}) esp=0x([0-9A-F]{8})\r\n",
+            timeout=5,
+        )
+        if match.group(1) != "1D3B5977":
+            raise SmokeFailure(f"unexpected pm32 signature: {match.group(1)}")
+        if int(match.group(2), 16) & 0x1 != 0x1:
+            raise SmokeFailure(f"protected mode enable bit was not observed in cr0: {match.group(2)}")
+        if match.group(3) != "00007000":
+            raise SmokeFailure(f"unexpected pm32 esp: {match.group(3)}")
+        self.expect(r"kernel_os> ", timeout=5)
+
+    def scenario_memory_map(self) -> None:
+        self.log("scenario memory_map")
+        self.send_operator_line("memory_map")
+        self.expect(r"bios e820 memory map:\r\n", timeout=5)
+        self.expect(r"#1 base=0x[0-9A-F]{16} length=0x[0-9A-F]{16} type=", timeout=5)
+        checkpoint = self.cursor
+        self.expect(r"kernel-safe usable ranges:\r\n", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
+        segment = self.transcript[checkpoint:self.cursor]
+        ranges = re.findall(r"#\d+ base=0x([0-9A-F]{16}) length=0x([0-9A-F]{16})\r?\n", segment)
+        if not ranges:
+            raise SmokeFailure("memory_map did not print any kernel-safe ranges")
+        if ranges[0] != ("0000000000001000", "0000000000006000"):
+            raise SmokeFailure(f"unexpected first safe range: {ranges[0]}")
+        if ("0000000000100000", "000000001FEE0000") not in ranges:
+            raise SmokeFailure(f"expected high usable range was missing: {ranges}")
 
     def scenario_chat_context_persistence(self) -> None:
         self.log("scenario chat context persistence")
@@ -284,21 +350,21 @@ class VMChatSmoke:
         first_payload = self.start_chat_turn("pagination smoke", expect_fresh=True)
         self.send_host_line("CMD: /peekpage 0000 0000")
         self.expect(r"AI requested command: /peekpage 0000 0000\r\n", timeout=5)
-        match = self.expect(r"peek 0x0000: ([0-9A-F]{2}(?: [0-9A-F]{2}){199})\r\n", timeout=8)
-        if len(match.group(1).split()) != 200:
-            raise SmokeFailure("peekpage did not return a full 0xC8-byte page")
+        match = self.expect(r"peek 0x0000: ([0-9A-F]{2}(?: [0-9A-F]{2})*)\r\n", timeout=20)
+        if len(match.group(1).split()) != 3200:
+            raise SmokeFailure("peekpage did not return a full 0xC80-byte page")
         self.expect_auto_continue(first_payload["session"])
         self.send_host_line("CMD: /peekpage 0000 0001")
         self.expect(r"AI requested command: /peekpage 0000 0001\r\n", timeout=5)
-        match = self.expect(r"peek 0x00C8: ([0-9A-F]{2}(?: [0-9A-F]{2}){199})\r\n", timeout=8)
-        if len(match.group(1).split()) != 200:
-            raise SmokeFailure("second peekpage did not return a full 0xC8-byte page")
+        match = self.expect(r"peek 0x0C80: ([0-9A-F]{2}(?: [0-9A-F]{2})*)\r\n", timeout=20)
+        if len(match.group(1).split()) != 3200:
+            raise SmokeFailure("second peekpage did not return a full 0xC80-byte page")
         self.expect_auto_continue(first_payload["session"])
         self.send_host_line("CMD: /peekpage 0000 0002")
         self.expect(r"AI requested command: /peekpage 0000 0002\r\n", timeout=5)
-        match = self.expect(r"peek 0x0190: ([0-9A-F]{2}(?: [0-9A-F]{2}){199})\r\n", timeout=8)
-        if len(match.group(1).split()) != 200:
-            raise SmokeFailure("third peekpage did not return a full 0xC8-byte page")
+        match = self.expect(r"peek 0x1900: ([0-9A-F]{2}(?: [0-9A-F]{2})*)\r\n", timeout=20)
+        if len(match.group(1).split()) != 3200:
+            raise SmokeFailure("third peekpage did not return a full 0xC80-byte page")
         self.expect_auto_continue(first_payload["session"])
         self.send_host_line("AI: pagination complete")
         self.expect(r"AI: pagination complete\r\nchat> ", timeout=5)
@@ -323,6 +389,63 @@ class VMChatSmoke:
         self.read_available(0.3)
         if "POST /chat " in self.transcript[checkpoint:]:
             raise SmokeFailure("interactive edit unexpectedly auto-continued the chat session")
+        self.exit_chat()
+
+    def scenario_grep(self) -> None:
+        self.log("scenario grep")
+        self.send_operator_line("grep")
+        self.expect(r"grep: navigator preset for the scratch editor buffer\r\n", timeout=5)
+        self.expect(r"pattern> ", timeout=5)
+        self.send_operator_line("ore")
+        self.expect(r"view text 0x0000: hell!\r\nmore\r\n", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
+        self.send_operator_line("view")
+        self.expect(r"view text 0x0000: hell!\r\nmore\r\n", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
+
+    def scenario_peek_navigator(self) -> None:
+        self.log("scenario peek navigator")
+        self.send_operator_line("peek")
+        self.expect(r"peek: inspect bytes from the live stage2 image\r\n", timeout=5)
+        self.expect(r"offset hex> ", timeout=5)
+        self.send_operator_line("0000")
+        self.expect(r"count hex \(1\.\.C80\)> ", timeout=5)
+        self.send_operator_line("0004")
+        first = self.expect(r"peek 0x0000: ([0-9A-F]{2}(?: [0-9A-F]{2}){3})\r\n", timeout=5).group(1)
+        self.expect(r"kernel_os> ", timeout=5)
+        self.send_operator_line("forward")
+        second = self.expect(r"view hex 0x0004: ([0-9A-F]{2}(?: [0-9A-F]{2}){3})\r\n", timeout=5).group(1)
+        if len(second.split()) != 4:
+            raise SmokeFailure("forward did not preserve the peek window size")
+        self.expect(r"kernel_os> ", timeout=5)
+        self.send_operator_line("back")
+        self.expect(rf"view hex 0x0000: {re.escape(first)}\r\n", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
+        self.send_operator_line("view")
+        self.expect(rf"view hex 0x0000: {re.escape(first)}\r\n", timeout=5)
+        self.expect(r"kernel_os> ", timeout=5)
+
+    def scenario_pm32_chat_tool(self) -> None:
+        self.log("scenario pm32 chat tool")
+        self.enter_chat()
+        first_payload = self.start_chat_turn("pm32 tool smoke", expect_fresh=True)
+        self.send_host_line("CMD: pm32")
+        self.expect(r"AI requested command: pm32\r\n", timeout=5)
+        self.expect(r"pm32: entering 32-bit protected mode\r\n", timeout=5)
+        self.expect(r"pm32: protected mode active\r\n", timeout=5)
+        match = self.expect(
+            r"pm32: returned to real mode sig=0x([0-9A-F]{8}) cr0=0x([0-9A-F]{8}) esp=0x([0-9A-F]{8})\r\n",
+            timeout=5,
+        )
+        if match.group(1) != "1D3B5977":
+            raise SmokeFailure(f"unexpected pm32 chat signature: {match.group(1)}")
+        if int(match.group(2), 16) & 0x1 != 0x1:
+            raise SmokeFailure(f"protected mode enable bit was not observed in chat pm32 cr0: {match.group(2)}")
+        if match.group(3) != "00007000":
+            raise SmokeFailure(f"unexpected chat pm32 esp: {match.group(3)}")
+        self.expect_auto_continue(first_payload["session"])
+        self.send_host_line("AI: pm32 tool verified")
+        self.expect(r"AI: pm32 tool verified\r\nchat> ", timeout=5)
         self.exit_chat()
 
     def scenario_loop(self) -> None:

@@ -1,67 +1,84 @@
 command_table:
-    dw cmd_help, do_help
     dw cmd_hardware_list, do_hardware_list
     dw cmd_memory_map, do_memory_map
     dw cmd_calc, do_calc
     dw cmd_chat, do_chat
     dw cmd_curl, do_curl
-    dw cmd_show_balance, do_show_balance
     dw cmd_hostreq, do_hostreq
     dw cmd_task_spawn, do_task_spawn
     dw cmd_task_list, do_task_list
     dw cmd_task_retire, do_task_retire
     dw cmd_task_step, do_task_step
     dw cmd_ramlist, do_ramlist
-    dw cmd_graph, do_graph
-    dw cmd_paint, do_paint
     dw cmd_edit, do_edit
+    dw cmd_grep, do_grep
     dw cmd_peek, do_peek
-    dw cmd_clear, do_clear
-    dw cmd_about, do_about
+    dw cmd_search, do_search
+    dw cmd_next, do_next
+    dw cmd_prev, do_prev
+    dw cmd_forward, do_forward
+    dw cmd_back, do_back
+    dw cmd_view, do_view
+    dw cmd_pm32, do_pm32
     dw cmd_halt, do_halt
     dw cmd_reboot, do_reboot
     dw 0, 0
 
 msg_banner db "stage2: command monitor ready", 13, 10, 0
-msg_hint db 0x68, 0x65, 0x6C, 0x70, 0x2C, 0x20, 0x68, 0x61, 0x72, 0x64, 0x77, 0x61, 0x72, 0x65, 0x5F, 0x6C, 0x69, 0x73, 0x74, 0x2C, 0x20, 0x6D, 0x65, 0x6D, 0x6F, 0x72, 0x79, 0x5F, 0x6D, 0x61, 0x70, 0x2C, 0x20, 0x63, 0x61, 0x6C, 0x63, 0x2C, 0x20, 0x63, 0x68, 0x61, 0x74, 0x2C, 0x20, 0x63, 0x75, 0x72, 0x6C, 0x2C, 0x20, 0x73, 0x68, 0x6F, 0x77, 0x5F, 0x62, 0x61, 0x6C, 0x61, 0x6E, 0x63, 0x65, 0x2C, 0x20, 0x68, 0x6F, 0x73, 0x74, 0x72, 0x65, 0x71, 0x2C, 0x20, 0x74, 0x61, 0x73, 0x6B, 0x5F, 0x73, 0x70, 0x61, 0x77, 0x6E, 0x2C, 0x20, 0x74, 0x61, 0x73, 0x6B, 0x5F, 0x6C, 0x69, 0x73, 0x74, 0x2C, 0x20, 0x74, 0x61, 0x73, 0x6B, 0x5F, 0x72, 0x65, 0x74, 0x69, 0x72, 0x65, 0x2C, 0x20, 0x74, 0x61, 0x73, 0x6B, 0x5F, 0x73, 0x74, 0x65, 0x70, 0x2C, 0x20, 0x72, 0x61, 0x6D, 0x6C, 0x69, 0x73, 0x74, 0x2C, 0x20, 0x67, 0x72, 0x61, 0x70, 0x68, 0x2C, 0x20, 0x70, 0x61, 0x69, 0x6E, 0x74, 0x2C, 0x20, 0x65, 0x64, 0x69, 0x74, 0x2C, 0x20, 0x70, 0x65, 0x65, 0x6B, 0x2C, 0x20, 0x63, 0x6C, 0x65, 0x61, 0x72, 0x2C, 0x20, 0x61, 0x62, 0x6F, 0x75, 0x74, 0x2C, 0x20, 0x68, 0x61, 0x6C, 0x74, 0x2C, 0x20, 0x72, 0x65, 0x62, 0x6F, 0x6F, 0x74, 0x0D, 0x0A, 0x0D, 0x0A, 0x00
+msg_hint db "hardware_list, memory_map, calc, chat, curl, hostreq, task_spawn, task_list, task_retire, task_step, ramlist, edit, grep, peek, search, next, prev, forward, back, view, pm32, halt, reboot", 13, 10, 13, 10, 0
 msg_help db "commands:", 13, 10
-         db " help           show command list", 13, 10
-         db " hardware_list  list hardware actions wired in this stage", 13, 10
-         db " memory_map     query BIOS E820 memory map", 13, 10
+         db " hardware_list  enumerate hardware visible through BIOS and low memory", 13, 10
+         db " memory_map     query BIOS E820 memory map and safe usable ranges", 13, 10
          db " calc           integer calculator REPL", 13, 10
          db " chat           send prompts over COM1 to the host bridge", 13, 10
          db " curl           fetch a webpage through the host bridge", 13, 10
-         db " show_balance   show Anthropic admin spend summary", 13, 10
          db " hostreq        send structured host control requests", 13, 10
          db " task_spawn     create a supervised task slot and host session", 13, 10
          db " task_list      show local task slots and host session summary", 13, 10
          db " task_retire    retire a supervised task slot", 13, 10
          db " task_step      step one supervised task through the host", 13, 10
          db 0x20, 0x72, 0x61, 0x6D, 0x6C, 0x69, 0x73, 0x74, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x52, 0x41, 0x4D, 0x20, 0x6C, 0x69, 0x6E, 0x6B, 0x65, 0x64, 0x20, 0x6C, 0x69, 0x73, 0x74, 0x0D, 0x0A
-         db " graph          ASCII function grapher", 13, 10
-         db " paint          mode 13h mouse paint demo", 13, 10
          db " edit           scratch text editor in RAM", 13, 10
-         db " peek           inspect stage2 bytes at an offset", 13, 10
-         db " clear          reset the text console", 13, 10
-         db " about          describe the current environment", 13, 10
+         db " grep           navigator preset for the scratch editor buffer", 13, 10
+         db " peek           navigator preset for stage2 memory in hex", 13, 10
+         db " search         find a literal string or hex byte pattern", 13, 10
+         db " next           jump to the next match in the current source", 13, 10
+         db " prev           jump to the previous match in the current source", 13, 10
+         db " forward        move the current view window forward", 13, 10
+         db " back           move the current view window backward", 13, 10
+         db " view           redraw the current window", 13, 10
+         db " pm32           enter 32-bit protected mode, run a self-test, and return", 13, 10
          db " halt           stop the CPU", 13, 10
          db " reboot         jump back through BIOS", 13, 10, 0
 msg_unknown db "unknown command", 13, 10, 0
-msg_cleared db "console cleared", 13, 10, 0
-msg_about db "kernel_os monitor running in 16-bit real mode on BIOS services", 13, 10, 0
 msg_halt db "halting CPU", 13, 10, 0
 msg_reboot db "rebooting through BIOS", 13, 10, 0
-msg_hardware_list db "hardware actions reachable on this machine:", 13, 10
-                  db " - BIOS keyboard input", 13, 10
-                  db " - VGA text and mode 13h graphics output", 13, 10
-                  db " - COM1 serial input and output", 13, 10
-                  db " - BIOS disk reads from the boot device", 13, 10
-                  db " - BIOS E820 memory map probing via memory_map", 13, 10
-                  db " - Direct PS/2 mouse polling for paint mode", 13, 10
-                  db " - Scratch text editing in RAM", 13, 10
-                  db "Next logical targets: LBA disk I/O, IRQs, PCI, protected mode, long mode, filesystem support", 13, 10, 0
+msg_hardware_header db "hardware enumeration:", 13, 10, 0
+msg_hardware_equipment db "equipment word: 0x", 0
+msg_hardware_base_memory db "base memory: ", 0
+msg_hardware_kb_suffix db " KB", 13, 10, 0
+msg_hardware_video db "video mode: 0x", 0
+msg_hardware_video_cols db " cols=", 0
+msg_hardware_video_rows db " rows=", 0
+msg_hardware_video_page db " page=", 0
+msg_hardware_e820_prefix db "e820 memory map: ", 0
+msg_hardware_serial_header db "serial ports:", 13, 10, 0
+msg_hardware_parallel_header db "parallel ports:", 13, 10, 0
+msg_hardware_drive_header db "bios drives:", 13, 10, 0
+msg_hardware_mouse_prefix db "ps/2 mouse probe: ", 0
+msg_hardware_com_prefix db " - COM", 0
+msg_hardware_lpt_prefix db " - LPT", 0
+msg_hardware_base_prefix db " base=0x", 0
+msg_hardware_drive_prefix db " - drive 0x", 0
+msg_hardware_drive_floppy db " responds (floppy-class)", 13, 10, 0
+msg_hardware_drive_fixed db " responds (fixed-disk-class)", 13, 10, 0
+msg_hardware_available db "available", 13, 10, 0
+msg_hardware_unavailable db "unavailable", 13, 10, 0
+msg_hardware_none db " - none", 13, 10, 0
 msg_memory_map_header db "bios e820 memory map:", 13, 10, 0
 msg_memory_map_unavailable db "memory map unavailable from BIOS", 13, 10, 0
+msg_memory_safe_header db "kernel-safe usable ranges:", 13, 10, 0
+msg_memory_safe_none db " - none", 13, 10, 0
 msg_base db " base=0x", 0
 msg_length db " length=0x", 0
 msg_type db " type=", 0
@@ -74,8 +91,10 @@ msg_e820_type_unknown db "unknown", 0
 msg_calc_intro db "calculator: enter expressions like 12+34 or 42 / 6. blank line or exit returns.", 13, 10, 0
 msg_calc_result db "= ", 0
 msg_calc_div_zero db "division by zero", 13, 10, 0
+msg_calc_overflow db "overflow: signed 16-bit range is -32768..32767", 13, 10, 0
 msg_calc_syntax db "syntax: <integer> <op> <integer> where op is + - * / %", 13, 10, 0
 msg_calc_exit db "leaving calculator", 13, 10, 0
+msg_int_min db "-32768", 0
 msg_chat_intro db "chat: blank line or exit leaves. command output may feed back automatically. /loop continues; /kill-self halts.", 13, 10, 0
 msg_chat_wait db "waiting for host response...", 13, 10, 0
 msg_chat_loop_wait db "chat: continuing with host using the latest command output...", 13, 10, 0
@@ -91,9 +110,8 @@ msg_curl_intro db "curl: fetch a URL through the host bridge. blank line or exit
 msg_curl_wait db "waiting for webpage...", 13, 10, 0
 msg_curl_exit db "leaving curl", 13, 10, 0
 msg_curl_bad db "curl syntax: use a non-empty http:// or https:// URL", 13, 10, 0
-msg_show_balance_wait db "checking anthropic spend summary through the host bridge...", 13, 10, 0
 msg_peek_intro db "peek: inspect bytes from the live stage2 image", 13, 10, 0
-msg_peek_bad db "peek syntax: offset and count are required hex values, count 1..C8", 13, 10, 0
+msg_peek_bad db "peek syntax: offset and count are required hex values, count 1..C80", 13, 10, 0
 msg_peek_page_bad db "peekpage syntax: base and page are required hex values", 13, 10, 0
 msg_peek_header db "peek 0x", 0
 msg_peek_mid db ": ", 0
@@ -138,7 +156,13 @@ msg_applying db "applying patch... hold on...", 13, 10, 0
 msg_patch_applied db "patch applied. beautiful chaos achieved.", 13, 10, 0
 msg_unknown_patch db "claude sent a malformed patch, ignoring it.", 13, 10, 0
 msg_stream_result db "stream ax=0x", 0
-msg_stream_bad db "stream syntax: 1..1F hex bytes", 13, 10, 0
+msg_stream_bad db "stream syntax: 1..1F0 hex bytes", 13, 10, 0
+msg_pm32_intro db "pm32: entering 32-bit protected mode", 13, 10, 0
+msg_pm32_return_prefix db "pm32: returned to real mode sig=0x", 0
+msg_pm32_return_cr0 db " cr0=0x", 0
+msg_pm32_return_esp db " esp=0x", 0
+msg_pm32_fail db "pm32: protected mode test did not complete", 13, 10, 0
+msg_pm32_serial_entered db "pm32: protected mode active", 13, 10, 0
 msg_host_post_list db 'POST /host {"action":"list-sessions"', 0
 msg_host_post_spawn_prefix db 'POST /host {"action":"spawn-session","session":"', 0
 msg_host_post_spawn_mid db '","goal":"', 0
@@ -146,7 +170,6 @@ msg_host_post_retire_prefix db 'POST /host {"action":"retire-session","session":
 msg_host_post_step_prefix db 'POST /host {"action":"step-session","session":"', 0
 msg_host_post_step_mid db '","prompt":"', 0
 msg_host_post_curl_prefix db 'POST /host {"action":"fetch-url","url":"', 0
-msg_host_post_balance db 'POST /host {"action":"show-balance"', 0
 msg_host_post_git_sync db 'POST /host {"action":"git-sync"', 0
 msg_host_post_clone_prefix db 'POST /host {"action":"clone-session","session":"', 0
 msg_host_post_adopt_prefix db 'POST /host {"action":"adopt-style","session":"', 0
@@ -156,43 +179,17 @@ msg_generation_json_prefix db ',"generation":"0x', 0
 msg_generation_json_suffix db '"', 0
 msg_json_quote db '"', 0
 msg_json_close db '}', 0
-msg_graph_intro db "graph viewer", 13, 10, 0
-msg_graph_mode_line db "mode 1: line", 13, 10, 0
-msg_graph_mode_parabola db "mode 2: quadratic", 13, 10, 0
-msg_graph_mode_wave db "mode 3: triangle wave", 13, 10, 0
-msg_graph_params_line db "y = ", 0
-msg_graph_params_quad db "y = ", 0
-msg_graph_params_wave db "amp=", 0
-msg_graph_x2_term db "*x*x + ", 0
-msg_graph_x_term db "*x + ", 0
-msg_graph_period_prefix db " period=", 0
-msg_graph_phase_prefix db " phase=", 0
-msg_graph_offset_prefix db " offset=", 0
-msg_graph_viewport db "view: x_step=", 0
-msg_graph_y_step db " y_step=", 0
-msg_graph_center_prefix db " center=(", 0
-msg_graph_comma db ", ", 0
-msg_graph_center_suffix db ")", 13, 10, 0
-msg_graph_edit_hint db "edit function values; blank line keeps the current value", 13, 10, 0
-msg_graph_view_hint db "edit viewport values; blank line keeps the current value", 13, 10, 0
-msg_graph_value_bad db "enter a valid integer in range", 13, 10, 0
-msg_graph_footer db "1 line  2 quadratic  3 wave  e edit  v view  r reset  q quit", 13, 10, 0
-prompt_graph_a db "a> ", 0
-prompt_graph_b db "b> ", 0
-prompt_graph_c db "c> ", 0
-prompt_graph_amp db "amplitude>=0> ", 0
-prompt_graph_period db "period>=2> ", 0
-prompt_graph_phase db "phase> ", 0
-prompt_graph_offset db "offset> ", 0
-prompt_graph_x_scale db "x units per column>=1> ", 0
-prompt_graph_y_scale db "y units per row>=1> ", 0
-prompt_graph_x_offset db "center x> ", 0
-prompt_graph_y_offset db "center y> ", 0
-msg_paint_intro db "paint: hold left mouse to draw; arrow keys or WASD sketch with the keyboard; c changes color, x clears, q or Esc exits", 13, 10, 0
-msg_paint_exit db "leaving paint mode", 13, 10, 0
-msg_paint_no_mouse db "mouse initialization failed", 13, 10, 0
 msg_editor_intro db "editor: type into the scratch buffer, Backspace deletes, Esc returns to the monitor", 13, 10, 0
 msg_editor_exit db "leaving editor", 13, 10, 0
+msg_grep_intro db "grep: navigator preset for the scratch editor buffer", 13, 10, 0
+msg_grep_empty db "grep: editor buffer is empty", 13, 10, 0
+msg_navigator_none db "navigator: run grep or peek first", 13, 10, 0
+msg_search_needed db "search: set a pattern first", 13, 10, 0
+msg_search_none db "search: no matches", 13, 10, 0
+msg_search_long db "search: pattern too long", 13, 10, 0
+msg_view_empty db "view: source is empty", 13, 10, 0
+msg_view_text_header db "view text 0x", 0
+msg_view_hex_header db "view hex 0x", 0
 prompt db "kernel_os> ", 0
 prompt_calc db "calc> ", 0
 prompt_chat db "chat> ", 0
@@ -205,28 +202,32 @@ prompt_ramlist db 0x72, 0x61, 0x6D, 0x6C, 0x69, 0x73, 0x74, 0x3E, 0x20, 0x00
 prompt_ramlist_value db "value> ", 0
 prompt_host_prompt db "prompt> ", 0
 prompt_host_modifier db "modifier> ", 0
+prompt_grep db "needle> ", 0
+prompt_search db "pattern> ", 0
 prompt_peek_offset db "offset hex> ", 0
-prompt_peek_count db "count hex (1..C8)> ", 0
+prompt_peek_count db "count hex (1..C80)> ", 0
 newline db 13, 10, 0
-cmd_help db "help", 0
 cmd_hardware_list db "hardware_list", 0
 cmd_memory_map db "memory_map", 0
 cmd_calc db "calc", 0
 cmd_chat db "chat", 0
 cmd_curl db "curl", 0
-cmd_show_balance db "show_balance", 0
 cmd_hostreq db "hostreq", 0
 cmd_task_spawn db "task_spawn", 0
 cmd_task_list db "task_list", 0
 cmd_task_retire db "task_retire", 0
 cmd_task_step db "task_step", 0
 cmd_ramlist db 0x72, 0x61, 0x6D, 0x6C, 0x69, 0x73, 0x74, 0x00
-cmd_graph db "graph", 0
-cmd_paint db "paint", 0
 cmd_edit db "edit", 0
+cmd_grep db "grep", 0
 cmd_peek db "peek", 0
-cmd_clear db "clear", 0
-cmd_about db "about", 0
+cmd_search db "search", 0
+cmd_next db "next", 0
+cmd_prev db "prev", 0
+cmd_forward db "forward", 0
+cmd_back db "back", 0
+cmd_view db "view", 0
+cmd_pm32 db "pm32", 0
 cmd_halt db "halt", 0
 cmd_reboot db "reboot", 0
 cmd_exit db "exit", 0

@@ -12,6 +12,15 @@ patch_bytes times PATCH_MAX_BYTES db 0
 peek_offset dw 0
 peek_count dw 0
 peek_token_buffer times 8 db 0
+pm32_saved_sp dw 0
+pm32_status db 0
+pm32_signature dd 0
+pm32_observed_cr0 dd 0
+pm32_observed_esp dd 0
+kernel_safe_lowmem_top dd 0
+safe_range_count db 0
+safe_range_bases times SAFE_RANGE_MAX dd 0
+safe_range_lengths times SAFE_RANGE_MAX dd 0
 input_buffer times INPUT_MAX + 1 db 0
 host_action_buffer times HOST_ACTION_SIZE db 0
 task_session_buffer times TASK_NAME_SIZE db 0
@@ -32,34 +41,29 @@ calc_op db 0
 calc_left dw 0
 calc_right dw 0
 calc_result dw 0
-graph_mode db 1
-graph_char db 0
-graph_a dw 1
-graph_b dw 0
-graph_c dw 0
-graph_wave_amp dw 8
-graph_wave_period dw 16
-graph_wave_phase dw 0
-graph_wave_offset dw 0
-graph_x_scale dw 1
-graph_y_scale dw 1
-graph_x_offset dw 0
-graph_y_offset dw 0
-graph_axis_row dw 0xffff
-graph_axis_col dw 0xffff
+hardware_equipment_word dw 0
+hardware_video_mode db 0
+hardware_video_cols db 0
+hardware_video_rows db 0
+hardware_video_page db 0
+hardware_port_count db 0
+hardware_drive_count db 0
+hardware_drive_id db 0
+text_console_ready db 0
 e820_continuation dd 0
 e820_buffer times 20 db 0
-mouse_packet db 0, 0, 0
-mouse_packet_index db 0
-mouse_color db 0
-mouse_prev_under db 0
-mouse_x dw 0
-mouse_y dw 0
-mouse_prev_x dw 0
-mouse_prev_y dw 0
 editor_length dw 0
 editor_buffer times EDITOR_CAPACITY db 0
+navigator_source db 0
+navigator_render_mode db 0
+navigator_match_active db 0
+navigator_cursor dw 0
+navigator_window dw 0
+navigator_match_offset dw 0
+navigator_needle_length dw 0
+navigator_needle times NAV_NEEDLE_MAX db 0
 serial_line_buffer times SERIAL_LINE_MAX + 1 db 0
+host_request_buffer times SERIAL_LINE_MAX + 1 db 0
 hex_digits db "0123456789ABCDEF"
 keymap_unshifted:
     times 0x02 db 0
@@ -96,3 +100,5 @@ keymap_shifted:
     db 0
     db ' '
     times (128 - ($ - keymap_shifted)) db 0
+
+stage2_image_end:

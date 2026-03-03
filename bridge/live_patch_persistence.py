@@ -10,7 +10,7 @@ from pathlib import Path
 
 PATCH_SUCCESS_PATTERN = re.compile(r"^patch applied\b", re.IGNORECASE)
 PATCH_COMMAND_PATTERN = re.compile(
-    r"^/patch\s+(?P<offset>(?:0x)?[0-9A-Fa-f]{1,4})(?P<byte_block>(?:\s+(?:0x)?[0-9A-Fa-f]{1,2}){1,32})\s*$"
+    r"^/patch\s+(?P<offset>(?:0x)?[0-9A-Fa-f]{1,4})(?P<byte_block>(?:\s+(?:0x)?[0-9A-Fa-f]{1,2}){1,512})\s*$"
 )
 LISTING_INCLUDE_PATTERN = re.compile(r'^\s*\d+\s+%include\s+"([^"]+)"\s*$')
 LISTING_CODE_PATTERN = re.compile(
