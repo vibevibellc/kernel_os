@@ -1,0 +1,6 @@
+build/
+vm/
+.env
+.DS_Store
+bridge/__pycache__/
+*.pyc
